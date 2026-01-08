@@ -124,6 +124,7 @@ def generate_schema_cypher(
     parquet_dir: Path,
     edge_relationships: dict,
     node_type_to_table: dict,
+    storage_path: str,
 ) -> str:
     """
     Generate schema.cypher content for ladybugdb.
@@ -134,30 +135,30 @@ def generate_schema_cypher(
         node_tables: List of original node table names
         edge_tables: List of original edge table names
         parquet_dir: Path to the parquet output directory (for storage path)
+        edge_relationships: Dict of edge relationships from schema
+        node_type_to_table: Mapping of node types to table names
+        storage_path: Storage path string for schema.cypher
 
     Returns:
         String containing the schema.cypher content
     """
     lines = []
 
-    # Compute relative storage path (e.g., './karate_csr/karate_random')
-    storage_path = f"./{parquet_dir.name}/{csr_table_name}"
-
-    # Helper to derive display name from table name
+    # Helper to derive display name from table name (lowercase)
     # nodes => nodes, nodes_person => person, nodes_foo => foo
     def get_node_display_name(table_name: str) -> str:
         if table_name == "nodes":
             return "nodes"
         elif table_name.startswith("nodes_"):
-            return table_name[6:]  # Remove "nodes_" prefix
-        return table_name
+            return table_name[6:].lower()  # Remove "nodes_" prefix and lowercase
+        return table_name.lower()
 
     def get_edge_display_name(table_name: str) -> str:
         if table_name == "edges":
             return "edges"
         elif table_name.startswith("edges_"):
-            return table_name[6:]  # Remove "edges_" prefix
-        return table_name
+            return table_name[6:].lower()  # Remove "edges_" prefix and lowercase
+        return table_name.lower()
 
     # Build mapping of original table names to display names
     node_display_names = {nt: get_node_display_name(nt) for nt in node_tables}
@@ -191,7 +192,11 @@ def generate_schema_cypher(
     # Generate REL TABLE definitions for each edge table
     for edge_table in edge_tables:
         rel_name = get_edge_display_name(edge_table)
-        edge_name = edge_table[6:] if edge_table.startswith("edges_") else edge_table
+        edge_name = (
+            edge_table[6:].lower()
+            if edge_table.startswith("edges_")
+            else edge_table.lower()
+        )
         src_node_type, dst_node_type = edge_relationships.get(edge_name, (None, None))
         if (
             src_node_type
@@ -237,6 +242,7 @@ def export_to_parquet_and_cypher(
     edge_tables: list[str],
     edge_relationships: dict,
     node_type_to_table: dict,
+    storage_path: str | None = None,
 ) -> None:
     """
     Export all tables to parquet format and generate schema.cypher.
@@ -247,6 +253,7 @@ def export_to_parquet_and_cypher(
         csr_table_name: Prefix for CSR tables
         node_tables: List of original node table names
         edge_tables: List of original edge table names
+        storage_path: Storage path for schema.cypher (default: output_db without .duckdb + csr_table_name)
     """
     print("\n=== Exporting to Parquet and Generating schema.cypher ===")
 
@@ -257,13 +264,17 @@ def export_to_parquet_and_cypher(
 
     print(f"Parquet output directory: {parquet_dir}")
 
+    # Compute storage path if not provided
+    if storage_path is None:
+        storage_path = f"./{output_path.stem}/{csr_table_name}"
+
     # Get all tables to export
     result = con.execute("SHOW TABLES").fetchall()
     all_tables = [row[0] for row in result]
 
-    # Export each table to parquet
+    # Export each table to parquet (lowercase filenames)
     for table_name in all_tables:
-        parquet_file = parquet_dir / f"{table_name}.parquet"
+        parquet_file = parquet_dir / f"{table_name.lower()}.parquet"
         con.execute(f"COPY {table_name} TO '{parquet_file}' (FORMAT 'parquet')")
         print(f"  Exported: {table_name} -> {parquet_file.name}")
 
@@ -276,6 +287,7 @@ def export_to_parquet_and_cypher(
         parquet_dir,
         edge_relationships,
         node_type_to_table,
+        storage_path,
     )
     schema_file = parquet_dir / "schema.cypher"
     schema_file.write_text(schema_cypher)
@@ -300,6 +312,7 @@ def create_csr_graph_to_duckdb(
     node_table: str | None = None,
     edge_table: str | None = None,
     schema_path: str | None = None,
+    storage_path: str | None = None,
 ) -> None:
     """
     Create CSR graph data and save to DuckDB using optimized SQL approach.
@@ -313,6 +326,7 @@ def create_csr_graph_to_duckdb(
         node_table: Specific node table to use (default: auto-discover)
         edge_table: Specific edge table to use (default: auto-discover)
         schema_path: Path to schema.cypher for edge relationship info
+        storage_path: Storage path for schema.cypher (default: output_db without .duckdb + csr_table_name)
     """
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
@@ -364,7 +378,7 @@ def create_csr_graph_to_duckdb(
             if nt == "nodes":
                 node_type_to_table["nodes"] = nt
             elif nt.startswith("nodes_"):
-                node_type_name = nt[6:]  # Remove "nodes_" prefix
+                node_type_name = nt[6:].lower()  # Remove "nodes_" prefix and lowercase
                 node_type_to_table[node_type_name] = nt
 
         print(f"Node type to table mapping: {node_type_to_table}")
@@ -383,7 +397,7 @@ def create_csr_graph_to_duckdb(
                 print(f"  Copied node table: {nt} -> {csr_table_name}_{nt}")
 
                 # Create per-table node mapping
-                node_type = nt[6:] if nt.startswith("nodes_") else nt
+                node_type = nt[6:].lower() if nt.startswith("nodes_") else nt.lower()
                 mapping_table = f"{csr_table_name}_mapping_{node_type}"
                 con.execute(
                     f"""
@@ -411,8 +425,8 @@ def create_csr_graph_to_duckdb(
         for et in edge_tables:
             # Determine source and target node types from schema
             edge_name = (
-                et[6:] if et.startswith("edges_") else et
-            )  # Remove "edges_" prefix
+                et[6:].lower() if et.startswith("edges_") else et.lower()
+            )  # Remove "edges_" prefix and lowercase
             src_node_type, dst_node_type = edge_relationships.get(
                 edge_name, (None, None)
             )
@@ -433,9 +447,9 @@ def create_csr_graph_to_duckdb(
                 # Fallback: use first node table for both
                 fallback_table = node_tables[0] if node_tables else "nodes"
                 fallback_node_type = (
-                    fallback_table[6:]
+                    fallback_table[6:].lower()
                     if fallback_table.startswith("nodes_")
-                    else fallback_table
+                    else fallback_table.lower()
                 )
                 src_mapping = f"{csr_table_name}_mapping_{fallback_node_type}"
                 dst_mapping = src_mapping
@@ -574,13 +588,13 @@ def create_csr_graph_to_duckdb(
             print(f"    indices: {indices_size} entries")
 
             # Drop temporary relations table
-            con.execute(f"DROP TABLE IF EXISTS relations_{edge_name};")
+            con.execute(f"DROP TABLE IF EXISTS relations_{edge_name.lower()};")
 
         # Count total nodes and edges for summary
         total_nodes = sum(node_counts.values())
         total_edges = 0
         for et in edge_tables:
-            edge_name = et[6:] if et.startswith("edges_") else et
+            edge_name = et[6:].lower() if et.startswith("edges_") else et.lower()
             result = con.execute(
                 f"SELECT COUNT(*) FROM {csr_table_name}_indices_{edge_name}"
             ).fetchone()
@@ -596,7 +610,7 @@ def create_csr_graph_to_duckdb(
 
         # List per-table node mappings for output
         node_mapping_tables = [
-            f"{csr_table_name}_mapping_{nt[6:] if nt.startswith('nodes_') else nt}"
+            f"{csr_table_name}_mapping_{nt[6:].lower() if nt.startswith('nodes_') else nt.lower()}"
             for nt in node_tables
         ]
 
@@ -604,7 +618,7 @@ def create_csr_graph_to_duckdb(
         for mapping_table in node_mapping_tables:
             print(f"  - {mapping_table} (orig_id → mapped_id)")
         for i, et in enumerate(edge_tables):
-            edge_name = et[6:] if et.startswith("edges_") else et
+            edge_name = et[6:].lower() if et.startswith("edges_") else et.lower()
             print(f"  - {csr_table_name}_indptr_{edge_name}")
             print(f"  - {csr_table_name}_indices_{edge_name}")
         print(f"  - {csr_table_name}_metadata (global)")
@@ -623,6 +637,7 @@ def create_csr_graph_to_duckdb(
             edge_tables,
             edge_relationships,
             node_type_to_table,
+            storage_path,
         )
 
     except Exception as e:
@@ -684,6 +699,12 @@ def main():
         help="Treat graph as directed (default: undirected)",
     )
     parser.add_argument(
+        "--storage",
+        type=str,
+        default=None,
+        help="Storage path for schema.cypher (default: output_db path without .duckdb extension)",
+    )
+    parser.add_argument(
         "--schema",
         type=str,
         default=None,
@@ -709,6 +730,14 @@ def main():
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
     print(f"Directed: {args.directed}")
+
+    # Compute default storage path from output_db if not specified
+    storage_path = args.storage
+    if storage_path is None:
+        # Use output_db path without .duckdb extension + csr_table_name
+        storage_path = f"./{Path(args.output_db).stem}/{args.csr_table}"
+    print(f"Storage path: {storage_path}")
+
     if args.node_table:
         print(f"Node table filter: {args.node_table}")
     if args.edge_table:
@@ -725,6 +754,7 @@ def main():
         node_table=args.node_table,
         edge_table=args.edge_table,
         schema_path=args.schema,
+        storage_path=storage_path,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
