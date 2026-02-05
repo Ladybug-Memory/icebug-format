@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to scan graph data in graph-std format from parquet files and print metadata, node tables, and reconstructed edge tables.
+Script to scan graph data in icebug-disk format from parquet files and print metadata, node tables, and reconstructed edge tables.
 
 Usage:
     uv run scan.py --input demo-db_csr --prefix demo
@@ -43,7 +43,7 @@ def parse_schema_cypher(schema_path: Path) -> dict:
 
 def scan_graph_std(input_dir: Path, prefix: str, schema_path: Path | None = None):
     """
-    Scan the graph data in graph-std format from parquet files and print metadata, nodes, and edges.
+    Scan the graph data in icebug-disk format from parquet files and print metadata, nodes, and edges.
     """
     con = duckdb.connect()  # In-memory connection
 

@@ -1,5 +1,5 @@
 [project]
-name = "graph-std"
+name = "icebug-disk"
 version = "0.1.0"
 description = "Tools to export graphs from NetworkX to various standard graph formats including CSV, DuckDB, SNAP, LadybugDB and CSR"
 readme = "README.md"

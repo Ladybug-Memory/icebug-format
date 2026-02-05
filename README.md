@@ -1,4 +1,11 @@
-# Graph Standard Format (graph-std)
+# Icebug Format
+
+> **Note**: This project was formerly called **graph-std**.
+
+Icebug is a standardized graph format designed for efficient graph data interchange. It comes in two formats:
+
+- **icebug-disk**: Parquet-based format for object storage
+- **icebug-memory**: Apache Arrow-based format for in-memory processing
 
 This project provides tools to convert graph data from simple DuckDB databases or Parquet files containing `nodes_*` and `edges_*` tables, along with a `schema.cypher` file, into standardized graph formats for efficient processing.
 
@@ -21,11 +28,11 @@ This will create a CSR representation with multiple tables depending on the numb
 - `{table_name}_metadata`: Global graph metadata (node count, edge count, directed flag)
 - `schema.cypher`: A cypher schema that a graph database can mount without ingesting
 
-## More information about graph-std and Apache GraphAR
+## More information about Icebug and Apache GraphAR
 
 [Blog Post](https://adsharma.github.io/graph-archiving/)
 
-## Recreating demo-db/graph-std
+## Recreating demo-db/icebug-disk
 
 Start from a simple demo-db.duckdb that looks like this
 
@@ -116,11 +123,11 @@ All data saved to: demo-db_csr.duckdb
 === Conversion Completed Successfully! ===
 ```
 
-You'll get a demo-db_csr.duckdb AND the object storage ready representation aka graph-std.
+You'll get a demo-db_csr.duckdb AND the object storage ready representation aka icebug-disk.
 
 ## Verification
 
-You can verify that the conversion went ok by running `scan.py`. It's also a good way to understand the graph-std format.
+You can verify that the conversion went ok by running `scan.py`. It's also a good way to understand the icebug-disk format.
 
 ```
 uv run scan.py --input demo-db_csr --prefix demo
