@@ -710,8 +710,40 @@ def main():
         default=None,
         help="Path to schema.cypher for edge relationship info (FROM/TO node types)",
     )
+    parser.add_argument(
+        "--graphar",
+        type=str,
+        default=None,
+        help="Path to GraphAr directory (converts GraphAr format to CSR instead of DuckDB)",
+    )
 
     args = parser.parse_args()
+
+    if args.graphar:
+        print("=== GraphAr to CSR Format Converter ===\n")
+        print(f"GraphAr directory: {args.graphar}")
+        print(f"CSR output database: {args.output_db}")
+        print(f"CSR table prefix: {args.csr_table}")
+        print(f"Directed: {args.directed}")
+
+        try:
+            from icebug_format.graphar import convert_graphar_to_graph_std
+        except ImportError:
+            raise ImportError(
+                "graphar package is required for --graphar option. "
+                "Install it with: pip install icebug-format[graphar]"
+            )
+
+        convert_graphar_to_graph_std(
+            graphar_dir=args.graphar,
+            output_db_path=args.output_db,
+            csr_table_name=args.csr_table,
+            directed=args.directed,
+        )
+
+        print("\n=== Conversion Completed Successfully! ===")
+        print(f"CSR graph data saved to: {args.output_db}")
+        return
 
     print("=== DuckDB to CSR Format Converter ===\n")
 
