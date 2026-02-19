@@ -1,16 +1,35 @@
 [project]
-name = "icebug-disk"
+name = "icebug-format"
 version = "0.1.0"
-description = "Tools to export graphs from NetworkX to various standard graph formats including CSV, DuckDB, SNAP, LadybugDB and CSR"
+description = "Convert graph data from DuckDB to CSR format for Icebug"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.3.2",
+]
+
+[project.optional-dependencies]
+full = [
     "real_ladybug>=0.14.1",
     "networkx>=3.5",
     "pandas>=2.3.2",
     "pyarrow>=21.0.0",
 ]
 
+[project.scripts]
+icebug-format = "icebug_format:main"
+
+[project.urls]
+Homepage = "https://github.com/anomalyco/icebug-format"
+Repository = "https://github.com/anomalyco/icebug-format"
+PyPI = "https://pypi.org/project/icebug-format"
+
+[tool.setuptools.packages.find]
+include = ["icebug_format*"]
+
 [tool.isort]
 profile = "black"
+
+[tool.uv]
+package = true
+dev-dependencies = []

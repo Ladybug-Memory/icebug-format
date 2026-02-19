@@ -15,7 +15,7 @@ This section describes how to generate various graphs using the provided tools.
 To generate graph data in various formats, run:
 
 ```bash
-python gen.py [--type TYPE] [--size SIZE] [--randomize-ids]
+uv run python generate/gen.py [--type TYPE] [--size SIZE] [--randomize-ids]
 ```
 
 Options:

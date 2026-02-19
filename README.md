@@ -12,7 +12,7 @@ This project provides tools to convert graph data from simple DuckDB databases o
 ## Sample Usage
 
 ```bash
-uv run python convert_csr.py \
+uv run icebug-format.py \
 --source-db karate/karate_random.duckdb \
 --output-db karate/karate_csr.duckdb \
 --csr-table karate \
@@ -97,30 +97,12 @@ CREATE REL TABLE LivesIn(FROM User TO City);
 and run:
 
 ```
-uv run convert_csr.py \
+uv run icebug-format.py \
 --directed \
 --source-db demo-db.duckdb \
 --output-db demo-db_csr.duckdb \
 --csr-table demo \
 --schema demo-db/schema.cypher
-...
-=== Exporting to Parquet and Generating schema.cypher ===
-Parquet output directory: demo-db_csr
-  Exported: demo_indices_follows -> demo_indices_follows.parquet
-  Exported: demo_indices_livesin -> demo_indices_livesin.parquet
-  Exported: demo_indptr_follows -> demo_indptr_follows.parquet
-  Exported: demo_indptr_livesin -> demo_indptr_livesin.parquet
-  Exported: demo_mapping_city -> demo_mapping_city.parquet
-  Exported: demo_mapping_user -> demo_mapping_user.parquet
-  Exported: demo_metadata -> demo_metadata.parquet
-  Exported: demo_nodes_city -> demo_nodes_city.parquet
-  Exported: demo_nodes_user -> demo_nodes_user.parquet
-  Generated: schema.cypher
-✓ Export complete. Files saved to: demo-db_csr
-
-All data saved to: demo-db_csr.duckdb
-
-=== Conversion Completed Successfully! ===
 ```
 
 You'll get a demo-db_csr.duckdb AND the object storage ready representation aka icebug-disk.
