@@ -4,8 +4,8 @@
 
 Icebug is a standardized graph format designed for efficient graph data interchange. It comes in two formats:
 
-- **icebug-disk**: Parquet-based format for object storage
-- **icebug-memory**: Apache Arrow-based format for in-memory processing
+- **icebug-disk**: CSR adjacency list/join indices for disk storage
+- **icebug-memory**: CSR adjacency list/join indices for in-memory processing
 
 This project provides tools to convert graph data from simple DuckDB databases or Parquet files containing `nodes_*` and `edges_*` tables, along with a `schema.cypher` file, into standardized graph formats for efficient processing.
 
