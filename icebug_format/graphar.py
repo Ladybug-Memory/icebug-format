@@ -24,6 +24,8 @@ from pathlib import Path
 import duckdb
 import pyarrow.parquet as pq
 
+from icebug_format.cli import set_memory_limit
+
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
     """Convert DuckDB column type to Cypher/Kuzu type."""
@@ -157,6 +159,7 @@ def convert_graphar_to_graph_std(
     output_db_path: str,
     csr_table_name: str = "graph",
     directed: bool = False,
+    memory_limit: str = "80%",
 ) -> None:
     """
     Convert GraphAr format to icebug-format.
@@ -166,6 +169,7 @@ def convert_graphar_to_graph_std(
         output_db_path: Path to output DuckDB database
         csr_table_name: Name prefix for CSR tables
         directed: Whether graph is directed
+        memory_limit: DuckDB memory limit setting
     """
     print("\n=== Converting GraphAr to Graph-Std Format ===")
 
@@ -184,6 +188,7 @@ def convert_graphar_to_graph_std(
 
     # Connect to output DuckDB database
     con = duckdb.connect(output_db_path)
+    set_memory_limit(con, memory_limit)
 
     # Drop all existing tables
     result = con.execute("SHOW TABLES").fetchall()

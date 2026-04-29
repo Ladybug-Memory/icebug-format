@@ -29,6 +29,7 @@ Usage Examples:
 """
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -84,6 +85,50 @@ def get_node_and_edge_tables(
     edge_tables = [t for t in all_tables if t.startswith("edges")]
 
     return node_tables, edge_tables
+
+
+def get_total_ram_gb() -> float | None:
+    """Return total physical RAM in decimal GB, if available."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+    if pages <= 0 or page_size <= 0:
+        return None
+
+    return pages * page_size / 1_000_000_000
+
+
+def format_gb(value: float) -> str:
+    """Format a GB value for DuckDB's memory_limit setting."""
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def default_memory_limit() -> str:
+    """Default DuckDB memory limit: 80% of physical RAM."""
+    total_ram_gb = get_total_ram_gb()
+    if total_ram_gb is None:
+        return "80%"
+    return f"{format_gb(total_ram_gb * 0.8)}GB"
+
+
+def parse_memory_limit(value: str) -> str:
+    """Parse --memory-limit as either a DuckDB size string or a GB number."""
+    normalized = value.strip()
+    if not normalized:
+        raise argparse.ArgumentTypeError("memory limit cannot be empty")
+
+    try:
+        return f"{format_gb(float(normalized))}GB"
+    except ValueError:
+        return normalized
+
+
+def set_memory_limit(con, memory_limit: str) -> None:
+    """Apply DuckDB's memory limit setting."""
+    con.execute("SET memory_limit = ?", [memory_limit])
 
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
@@ -313,6 +358,7 @@ def create_csr_graph_to_duckdb(
     edge_table: str | None = None,
     schema_path: str | None = None,
     storage_path: str | None = None,
+    memory_limit: str = "80%",
 ) -> None:
     """
     Create CSR graph data and save to DuckDB using optimized SQL approach.
@@ -327,11 +373,13 @@ def create_csr_graph_to_duckdb(
         edge_table: Specific edge table to use (default: auto-discover)
         schema_path: Path to schema.cypher for edge relationship info
         storage_path: Storage path for schema.cypher (default: output_db without .duckdb + csr_table_name)
+        memory_limit: DuckDB memory limit setting
     """
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
     # Connect to a fresh DuckDB database for output
     con = duckdb.connect(output_db_path)
+    set_memory_limit(con, memory_limit)
 
     # Drop all existing tables to recreate from scratch
     result = con.execute("SHOW TABLES").fetchall()
@@ -399,16 +447,14 @@ def create_csr_graph_to_duckdb(
                 # Create per-table node mapping
                 node_type = nt[6:].lower() if nt.startswith("nodes_") else nt.lower()
                 mapping_table = f"{csr_table_name}_mapping_{node_type}"
-                con.execute(
-                    f"""
+                con.execute(f"""
                     CREATE TABLE {mapping_table} AS
                     SELECT
                         row_number() OVER (ORDER BY {pk_col}) - 1 AS csr_index,
                         {pk_col} AS original_node_id
                     FROM {csr_table_name}_{nt}
                     ORDER BY csr_index;
-                """
-                )
+                """)
                 print(f"  Created node mapping: {mapping_table}")
 
                 # Track node count
@@ -534,8 +580,7 @@ def create_csr_graph_to_duckdb(
 
             # Build CSR indptr for this edge type
             indptr_table = f"{csr_table_name}_indptr_{edge_name}"
-            con.execute(
-                f"""
+            con.execute(f"""
                 CREATE TABLE {indptr_table} AS
                 WITH node_range AS (
                     SELECT unnest(range(0, {num_src_nodes})) AS node_id
@@ -554,19 +599,16 @@ def create_csr_graph_to_duckdb(
                 )
                 SELECT ptr FROM cumulative
                 ORDER BY node_id;
-            """
-            )
+            """)
 
             # Recreate with leading zero
-            con.execute(
-                f"""
+            con.execute(f"""
                 CREATE OR REPLACE TABLE {indptr_table} AS
                 SELECT 0::BIGINT AS ptr
                 UNION ALL
                 SELECT ptr::int64 FROM {indptr_table}
                 ORDER BY ptr;
-            """
-            )
+            """)
 
             result = con.execute(f"SELECT COUNT(*) FROM {indptr_table}").fetchone()
             indptr_size = result[0] if result else 0
@@ -574,14 +616,12 @@ def create_csr_graph_to_duckdb(
 
             # Build CSR indices for this edge type
             indices_table = f"{csr_table_name}_indices_{edge_name}"
-            con.execute(
-                f"""
+            con.execute(f"""
                 CREATE TABLE {indices_table} AS
                 SELECT csr_target AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
                 FROM relations_{edge_name}
                 ORDER BY csr_source, csr_target;
-            """
-            )
+            """)
 
             result = con.execute(f"SELECT COUNT(*) FROM {indices_table}").fetchone()
             indices_size = result[0] if result else 0
@@ -601,12 +641,10 @@ def create_csr_graph_to_duckdb(
             total_edges += result[0] if result else 0
 
         # Create global metadata
-        con.execute(
-            f"""
+        con.execute(f"""
         CREATE TABLE {csr_table_name}_metadata AS
         SELECT {total_nodes} AS n_nodes, {total_edges} AS n_edges, {directed} AS directed
-        """
-        )
+        """)
 
         # List per-table node mappings for output
         node_mapping_tables = [
@@ -716,6 +754,12 @@ def main():
         default=None,
         help="Path to GraphAr directory (converts GraphAr format to CSR instead of DuckDB)",
     )
+    parser.add_argument(
+        "--memory-limit",
+        type=parse_memory_limit,
+        default=default_memory_limit(),
+        help="DuckDB memory limit as a size string or GB number (default: 80%% of RAM)",
+    )
 
     args = parser.parse_args()
 
@@ -725,6 +769,7 @@ def main():
         print(f"CSR output database: {args.output_db}")
         print(f"CSR table prefix: {args.csr_table}")
         print(f"Directed: {args.directed}")
+        print(f"DuckDB memory limit: {args.memory_limit}")
 
         try:
             from icebug_format.graphar import convert_graphar_to_graph_std
@@ -739,6 +784,7 @@ def main():
             output_db_path=args.output_db,
             csr_table_name=args.csr_table,
             directed=args.directed,
+            memory_limit=args.memory_limit,
         )
 
         print("\n=== Conversion Completed Successfully! ===")
@@ -762,6 +808,7 @@ def main():
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
     print(f"Directed: {args.directed}")
+    print(f"DuckDB memory limit: {args.memory_limit}")
 
     # Compute default storage path from output_db if not specified
     storage_path = args.storage
@@ -787,6 +834,7 @@ def main():
         edge_table=args.edge_table,
         schema_path=args.schema,
         storage_path=storage_path,
+        memory_limit=args.memory_limit,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
