@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system duckdb "pyarrow>=21"
+          uv pip install --system --no-deps -e .
+          uv pip install --system pytest
+
+      - name: Run tests
+        run: pytest

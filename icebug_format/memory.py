@@ -12,7 +12,7 @@ import duckdb
 import pyarrow as pa
 
 _SOURCE_ALIASES = ("source", "src", "from")
-_TARGET_ALIASES = ("destination", "dest", "to")
+_TARGET_ALIASES = ("target", "destination", "dest", "to")
 
 
 def _resolve_rel_columns(schema: pa.Schema) -> tuple[str, str]:
@@ -121,17 +121,18 @@ def convert_arrow_tables_to_csr(
         FROM edges e
         JOIN src_map m1 ON e.{src_col} = m1.original_node_id
         JOIN dst_map m2 ON e.{dst_col} = m2.original_node_id
-        WHERE e.{src_col} != e.{dst_col}
     """
 
     if directed:
         rel_query = f"WITH {map_cte} SELECT {select_fwd} {join_clause}"
     else:
+        # Self-loops appear once (forward only); non-self edges get both directions.
         rel_query = f"""
             WITH {map_cte}
             SELECT {select_fwd} {join_clause}
             UNION ALL
             SELECT {select_rev} {join_clause}
+            WHERE e.{src_col} != e.{dst_col}
         """
 
     edge_props_select = (", " + ", ".join(edge_cols)) if edge_cols else ""
@@ -174,16 +175,16 @@ def convert_arrow_tables_to_csr(
         # Prepend leading zero so indptr[i] = start of node i's adjacency list
         con.execute("""
             CREATE OR REPLACE TABLE indptr_table AS
-            SELECT 0::BIGINT AS ptr
+            SELECT 0::UINT64 AS ptr
             UNION ALL
-            SELECT ptr::BIGINT FROM indptr_table
+            SELECT ptr::UINT64 FROM indptr_table
             ORDER BY ptr
         """)
 
         # Build indices: neighbour list sorted by (source, target)
         con.execute(f"""
             CREATE TABLE indices_table AS
-            SELECT csr_target AS target{edge_props_select}
+            SELECT csr_target::UINT64 AS target{edge_props_select}
             FROM relations
             ORDER BY csr_source, csr_target
         """)

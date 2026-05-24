@@ -97,7 +97,7 @@ The `rel_arrow_table` source and target columns are resolved by name in priority
 | Role | Accepted names (in order) | Fallback |
 |---|---|---|
 | Source | `source`, `src`, `from` | 0th column |
-| Target | `destination`, `dest`, `to` | 1st column |
+| Target | `target`, `destination`, `dest`, `to` | 1st column |
 
 Any remaining columns are preserved as edge properties in `graph.indices`.
 
