@@ -11,7 +11,7 @@ The conversion process:
 2. Handles sparse node IDs by creating a dense mapping (original_id -> csr_index)
 3. Converts edges to CSR (Compressed Sparse Row) format
 4. Pre-sorts edges by source using DuckDB for memory efficiency
-5. Saves CSR data and node mapping to DuckDB for reuse
+5. Saves CSR data to DuckDB for reuse
 6. Exports to parquet format and generates schema.cypher for ladybugdb
 
 Key Features:
@@ -22,10 +22,10 @@ Key Features:
 
 Usage Examples:
     # Convert edges in karate_random.duckdb to CSR format and save to csr_graph.db
-    python convert_csr.py --source-db karate_random.duckdb --output-db csr_graph.db
+    python icebug-format.py --source-db karate_random.duckdb --output-db csr_graph.db
 
     # Convert with limited data for testing
-    python convert_csr.py --source-db karate_random.duckdb --test --limit 50000 --output-db test.db
+    python icebug-format.py --source-db karate_random.duckdb --test --limit 50000 --output-db test.db
 """
 
 import argparse
@@ -34,6 +34,18 @@ import re
 from pathlib import Path
 
 import duckdb
+import pyarrow.parquet as pq
+
+ICEBUG_DISK_VERSION = "v1"
+
+
+def _write_parquet_with_icebug_metadata(con, table_name: str, output_path: Path) -> None:
+    """Export a DuckDB table to parquet with icebug_disk_version metadata."""
+    arrow_table = con.execute(f"SELECT * FROM {table_name}").arrow().read_all()
+    existing_metadata = arrow_table.schema.metadata or {}
+    new_metadata = {**existing_metadata, b"icebug_disk_version": ICEBUG_DISK_VERSION.encode()}
+    arrow_table = arrow_table.replace_schema_metadata(new_metadata)
+    pq.write_table(arrow_table, str(output_path))
 
 
 def parse_schema_cypher(schema_path: Path) -> dict:
@@ -227,7 +239,7 @@ def generate_schema_cypher(
             display_name = node_display_names[node_table]
             lines.append(
                 f"CREATE NODE TABLE {display_name}({cols_str}, PRIMARY KEY({pk_col})) "
-                f"WITH (storage = '{storage_path}');"
+                f"WITH (storage = '{storage_path}', format = 'icebug-disk');"
             )
         except Exception as e:
             print(
@@ -271,7 +283,7 @@ def generate_schema_cypher(
             props_str = ", ".join(col_defs)
             lines.append(
                 f"CREATE REL TABLE {rel_name}(FROM {src_table} TO {dst_table}"
-                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}');"
+                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}', format = 'icebug-disk');"
             )
         except Exception as e:
             print(f"Warning: Could not generate schema for rel table {rel_name}: {e}")
@@ -311,17 +323,38 @@ def export_to_parquet_and_cypher(
 
     # Compute storage path if not provided
     if storage_path is None:
-        storage_path = f"./{output_path.stem}/{csr_table_name}"
+        storage_path = f"./{output_path.stem}"
 
-    # Get all tables to export
-    result = con.execute("SHOW TABLES").fetchall()
-    all_tables = [row[0] for row in result]
+    # Helper to get node display name from original table name
+    def get_display_name(table_name: str, prefix: str) -> str:
+        if table_name == prefix:
+            return prefix
+        if table_name.startswith(f"{prefix}_"):
+            return table_name[len(prefix) + 1:].lower()
+        return table_name.lower()
 
-    # Export each table to parquet (lowercase filenames)
-    for table_name in all_tables:
-        parquet_file = parquet_dir / f"{table_name.lower()}.parquet"
-        con.execute(f"COPY {table_name} TO '{parquet_file}' (FORMAT 'parquet')")
-        print(f"  Exported: {table_name} -> {parquet_file.name}")
+    # Export node tables: nodes_<display_name>.parquet
+    for node_table in node_tables:
+        display_name = get_display_name(node_table, "nodes")
+        csr_node_table = f"{csr_table_name}_{node_table}"
+        parquet_file = parquet_dir / f"nodes_{display_name}.parquet"
+        _write_parquet_with_icebug_metadata(con, csr_node_table, parquet_file)
+        print(f"  Exported: {csr_node_table} -> {parquet_file.name}")
+
+    # Export edge tables: indices_<edge_name>.parquet, indptr_<edge_name>.parquet
+    for edge_table in edge_tables:
+        edge_name = (
+            edge_table[6:].lower() if edge_table.startswith("edges_") else edge_table.lower()
+        )
+        indices_table = f"{csr_table_name}_indices_{edge_name}"
+        indices_file = parquet_dir / f"indices_{edge_name}.parquet"
+        _write_parquet_with_icebug_metadata(con, indices_table, indices_file)
+        print(f"  Exported: {indices_table} -> {indices_file.name}")
+
+        indptr_table = f"{csr_table_name}_indptr_{edge_name}"
+        indptr_file = parquet_dir / f"indptr_{edge_name}.parquet"
+        _write_parquet_with_icebug_metadata(con, indptr_table, indptr_file)
+        print(f"  Exported: {indptr_table} -> {indptr_file.name}")
 
     # Generate schema.cypher
     schema_cypher = generate_schema_cypher(
@@ -431,33 +464,20 @@ def create_csr_graph_to_duckdb(
 
         print(f"Node type to table mapping: {node_type_to_table}")
 
-        # Copy all node tables with proper prefixing and create per-table mappings
+        # Copy all node tables with proper prefixing
         node_counts = {}  # Track node counts per table
+        node_pk_cols = {}  # pk column name per node table
         for nt in node_tables:
             try:
-                # Get the primary key column (first column of original node table)
                 cols = con.execute(f"DESCRIBE orig.{nt}").fetchall()
                 pk_col = cols[0][0] if cols else "id"
+                node_pk_cols[nt] = pk_col
 
                 con.execute(
                     f"CREATE TABLE {csr_table_name}_{nt} AS SELECT * FROM orig.{nt} ORDER BY {pk_col};"
                 )
                 print(f"  Copied node table: {nt} -> {csr_table_name}_{nt}")
 
-                # Create per-table node mapping
-                node_type = nt[6:].lower() if nt.startswith("nodes_") else nt.lower()
-                mapping_table = f"{csr_table_name}_mapping_{node_type}"
-                con.execute(f"""
-                    CREATE TABLE {mapping_table} AS
-                    SELECT
-                        row_number() OVER (ORDER BY {pk_col}) - 1 AS csr_index,
-                        {pk_col} AS original_node_id
-                    FROM {csr_table_name}_{nt}
-                    ORDER BY csr_index;
-                """)
-                print(f"  Created node mapping: {mapping_table}")
-
-                # Track node count
                 result = con.execute(
                     f"SELECT COUNT(*) FROM {csr_table_name}_{nt}"
                 ).fetchone()
@@ -469,77 +489,72 @@ def create_csr_graph_to_duckdb(
         print("\nStep 1: Building per-edge-table CSR structures...")
 
         for et in edge_tables:
-            # Determine source and target node types from schema
-            edge_name = (
-                et[6:].lower() if et.startswith("edges_") else et.lower()
-            )  # Remove "edges_" prefix and lowercase
-            src_node_type, dst_node_type = edge_relationships.get(
-                edge_name, (None, None)
-            )
+            edge_name = et[6:].lower() if et.startswith("edges_") else et.lower()
+            src_node_type, dst_node_type = edge_relationships.get(edge_name, (None, None))
 
-            # Find the corresponding node tables
             src_table = node_type_to_table.get(src_node_type)
             dst_table = node_type_to_table.get(dst_node_type)
 
-            fallback_node_type = None
             if src_table and dst_table:
-                src_mapping = f"{csr_table_name}_mapping_{src_node_type}"
-                dst_mapping = f"{csr_table_name}_mapping_{dst_node_type}"
                 num_src_nodes = node_counts.get(src_table, 0)
-                print(
-                    f"\n  Processing {et}: {src_node_type} ({num_src_nodes} nodes) -> {dst_node_type}"
-                )
+                print(f"\n  Processing {et}: {src_node_type} ({num_src_nodes} nodes) -> {dst_node_type}")
             else:
-                # Fallback: use first node table for both
-                fallback_table = node_tables[0] if node_tables else "nodes"
-                fallback_node_type = (
-                    fallback_table[6:].lower()
-                    if fallback_table.startswith("nodes_")
-                    else fallback_table.lower()
-                )
-                src_mapping = f"{csr_table_name}_mapping_{fallback_node_type}"
-                dst_mapping = src_mapping
-                num_src_nodes = node_counts.get(fallback_table, 0)
-                print(f"\n  Processing {et}: using fallback mapping {src_mapping}")
+                src_table = dst_table = node_tables[0] if node_tables else "nodes"
+                num_src_nodes = node_counts.get(src_table, 0)
+                print(f"\n  Processing {et}: using fallback node table {src_table}")
+
+            src_pk = node_pk_cols.get(src_table, "id")
+            dst_pk = node_pk_cols.get(dst_table, "id")
+            src_csr_table = f"{csr_table_name}_{src_table}"
+            dst_csr_table = f"{csr_table_name}_{dst_table}"
+
+            # Inline id→csr_index mapping as CTEs — no separate mapping tables needed
+            map_cte = f"""
+                src_map AS (
+                    SELECT row_number() OVER (ORDER BY {src_pk}) - 1 AS csr_index,
+                           {src_pk} AS original_node_id
+                    FROM {src_csr_table}
+                ),
+                dst_map AS (
+                    SELECT row_number() OVER (ORDER BY {dst_pk}) - 1 AS csr_index,
+                           {dst_pk} AS original_node_id
+                    FROM {dst_csr_table}
+                )"""
 
             # Get edge columns excluding source and target
             edge_cols_result = con.execute(f"DESCRIBE orig.{et}").fetchall()
             edge_col_names = [col[0] for col in edge_cols_result]
             edge_cols = [c for c in edge_col_names if c not in ["source", "target"]]
 
-            # Prepare select column strings
             select_cols = "m1.csr_index AS csr_source, m2.csr_index AS csr_target"
             if edge_cols:
                 select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
-            reverse_select_cols = (
-                "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
-            )
+            reverse_select_cols = "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
             if edge_cols:
                 reverse_select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
             reverse_cols = "csr_target AS csr_source, csr_source AS csr_target"
             if edge_cols:
                 reverse_cols += ", " + ", ".join(edge_cols)
 
-            # Create relations table for this edge type
+            join_clause = f"""
+                FROM orig.{et} e
+                JOIN src_map m1 ON e.source = m1.original_node_id
+                JOIN dst_map m2 ON e.target = m2.original_node_id
+                WHERE e.source != e.target"""
+
             if limit_rels:
                 limit_per_table = limit_rels // len(edge_tables)
                 if directed:
                     rel_query = f"""
-                        SELECT {select_cols}
-                        FROM orig.{et} e
-                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
-                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
-                        WHERE e.source != e.target
+                        WITH {map_cte}
+                        SELECT {select_cols} {join_clause}
                         LIMIT {limit_per_table}
                     """
                 else:
                     rel_query = f"""
-                        WITH limited AS (
-                            SELECT {select_cols}
-                            FROM orig.{et} e
-                            JOIN {src_mapping} m1 ON e.source = m1.original_node_id
-                            JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
-                            WHERE e.source != e.target
+                        WITH {map_cte},
+                        limited AS (
+                            SELECT {select_cols} {join_clause}
                             LIMIT {limit_per_table}
                         )
                         SELECT * FROM limited
@@ -549,25 +564,15 @@ def create_csr_graph_to_duckdb(
             else:
                 if directed:
                     rel_query = f"""
-                        SELECT {select_cols}
-                        FROM orig.{et} e
-                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
-                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
-                        WHERE e.source != e.target
+                        WITH {map_cte}
+                        SELECT {select_cols} {join_clause}
                     """
                 else:
                     rel_query = f"""
-                        SELECT {select_cols}
-                        FROM orig.{et} e
-                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
-                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
-                        WHERE e.source != e.target
+                        WITH {map_cte}
+                        SELECT {select_cols} {join_clause}
                         UNION ALL
-                        SELECT {reverse_select_cols}
-                        FROM orig.{et} e
-                        JOIN {src_mapping} m1 ON e.source = m1.original_node_id
-                        JOIN {dst_mapping} m2 ON e.target = m2.original_node_id
-                        WHERE e.source != e.target
+                        SELECT {reverse_select_cols} {join_clause}
                     """
 
             con.execute(f"CREATE TABLE relations_{edge_name} AS {rel_query};")
@@ -639,27 +644,6 @@ def create_csr_graph_to_duckdb(
                 f"SELECT COUNT(*) FROM {csr_table_name}_indices_{edge_name}"
             ).fetchone()
             total_edges += result[0] if result else 0
-
-        # Create global metadata
-        con.execute(f"""
-        CREATE TABLE {csr_table_name}_metadata AS
-        SELECT {total_nodes} AS n_nodes, {total_edges} AS n_edges, {directed} AS directed
-        """)
-
-        # List per-table node mappings for output
-        node_mapping_tables = [
-            f"{csr_table_name}_mapping_{nt[6:].lower() if nt.startswith('nodes_') else nt.lower()}"
-            for nt in node_tables
-        ]
-
-        print("\n✅ CSR format built and cleaned up. Final tables:")
-        for mapping_table in node_mapping_tables:
-            print(f"  - {mapping_table} (orig_id → mapped_id)")
-        for i, et in enumerate(edge_tables):
-            edge_name = et[6:].lower() if et.startswith("edges_") else et.lower()
-            print(f"  - {csr_table_name}_indptr_{edge_name}")
-            print(f"  - {csr_table_name}_indices_{edge_name}")
-        print(f"  - {csr_table_name}_metadata (global)")
 
         print(
             f"\n✓ Built CSR format: {total_nodes} nodes, {total_edges} edges across {len(edge_tables)} edge types"
@@ -813,8 +797,7 @@ def main():
     # Compute default storage path from output_db if not specified
     storage_path = args.storage
     if storage_path is None:
-        # Use output_db path without .duckdb extension + csr_table_name
-        storage_path = f"./{Path(args.output_db).stem}/{args.csr_table}"
+        storage_path = f"./{Path(args.output_db).stem}"
     print(f"Storage path: {storage_path}")
 
     if args.node_table:

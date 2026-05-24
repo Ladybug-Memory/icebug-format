@@ -9,9 +9,8 @@ icebug-format compatible databases.
 The conversion process:
 1. Reads vertex data from GraphAr parquet files
 2. Reads edge adjacency lists and properties from GraphAr parquet files
-3. Creates a mapping from original vertex IDs to contiguous indices
-4. Converts edges to CSR (Compressed Sparse Row) format
-5. Saves to DuckDB and exports to parquet format with schema.cypher
+3. Converts edges to CSR (Compressed Sparse Row) format
+4. Saves to DuckDB and exports to parquet format with schema.cypher
 
 Usage Examples:
     # Convert graphar graph to icebug-format
@@ -24,7 +23,7 @@ from pathlib import Path
 import duckdb
 import pyarrow.parquet as pq
 
-from icebug_format.cli import set_memory_limit
+from icebug_format.cli import ICEBUG_DISK_VERSION, _write_parquet_with_icebug_metadata, set_memory_limit
 
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
@@ -96,7 +95,7 @@ def read_graphar_vertices(vertex_info, graph_path: Path) -> dict:
     return vertices
 
 
-def read_graphar_edges(edge_info, graph_path: Path, vertex_indices: dict) -> dict:
+def read_graphar_edges(edge_info, graph_path: Path) -> dict:
     """
     Read edges from GraphAr parquet files.
 
@@ -199,7 +198,6 @@ def convert_graphar_to_graph_std(
     # Read vertices
     print("\nStep 1: Reading vertices...")
     vertex_type_to_table = {}
-    vertex_indices = {}
 
     for i in range(graph_info.vertex_info_num()):
         vertex_info = graph_info.get_vertex_info_by_index(i)
@@ -260,20 +258,7 @@ def convert_graphar_to_graph_std(
 
             print(f"  Created {node_table_name} with {len(vertex_rows)} vertices")
 
-            # Create mapping table
-            pk_col = prop_group_names[0]
-            mapping_table_name = f"{csr_table_name}_mapping_{vertex_type}"
-            con.execute(f"""
-                CREATE TABLE {mapping_table_name} AS
-                SELECT row_number() OVER (ORDER BY "{pk_col}") - 1 AS csr_index,
-                       "{pk_col}" AS original_node_id
-                FROM {node_table_name}
-                ORDER BY csr_index
-            """)
-            print(f"  Created {mapping_table_name}")
-
             vertex_type_to_table[vertex_type] = node_table_name
-            vertex_indices[vertex_type] = mapping_table_name
         else:
             print(f"  Warning: No vertices found for type {vertex_type}")
 
@@ -288,21 +273,16 @@ def convert_graphar_to_graph_std(
 
         print(f"\n  Processing edge {edge_type}: {src_type} -> {dst_type}")
 
-        # Get source and destination mapping tables
-        src_mapping = vertex_indices.get(src_type)
-        dst_mapping = vertex_indices.get(dst_type)
+        # Get source and destination node tables
+        src_table = vertex_type_to_table.get(src_type)
+        dst_table = vertex_type_to_table.get(dst_type)
 
-        if not src_mapping or not dst_mapping:
-            print(f"    Warning: Missing mapping tables for {src_type} -> {dst_type}")
+        if not src_table or not dst_table:
+            print(f"    Warning: Missing node tables for {src_type} -> {dst_type}")
             continue
 
         # Get vertex counts
-        src_table = vertex_type_to_table.get(src_type)
-        num_src_nodes = (
-            con.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
-            if src_table
-            else 0
-        )
+        num_src_nodes = con.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
         print(f"    Source nodes: {num_src_nodes}")
 
         # Read edge data
@@ -465,12 +445,6 @@ def convert_graphar_to_graph_std(
         if result:
             total_edges += result[0]
 
-    # Create global metadata
-    con.execute(f"""
-        CREATE TABLE {csr_table_name}_metadata AS
-        SELECT {total_nodes}::BIGINT AS n_nodes, {total_edges}::BIGINT AS n_edges, {directed}::BOOLEAN AS directed
-    """)
-
     print(f"\n✅ Conversion complete: {total_nodes} nodes, {total_edges} edges")
 
     # Export to parquet and generate schema.cypher
@@ -482,24 +456,35 @@ def convert_graphar_to_graph_std(
 
     print(f"Parquet output directory: {parquet_dir}")
 
-    # Get all tables
-    result = con.execute("SHOW TABLES").fetchall()
-    all_tables = [row[0] for row in result]
+    # Compute storage path (points to the parquet directory)
+    storage_path = f"./{parquet_dir.name}"
 
-    # Export each table
-    for table_name in all_tables:
-        parquet_file = parquet_dir / f"{table_name}.parquet"
-        con.execute(f"COPY {table_name} TO '{parquet_file}' (FORMAT 'parquet')")
-        print(f"  Exported: {table_name} -> {parquet_file.name}")
+    # Export node tables: nodes_<vertex_type>.parquet
+    for vertex_type, src_table in vertex_type_to_table.items():
+        csr_node_table = f"{csr_table_name}_{src_table}"
+        parquet_file = parquet_dir / f"nodes_{vertex_type}.parquet"
+        _write_parquet_with_icebug_metadata(con, csr_node_table, parquet_file)
+        print(f"  Exported: {csr_node_table} -> {parquet_file.name}")
+
+    # Export edge tables: indices_<edge_type>.parquet, indptr_<edge_type>.parquet
+    for i in range(graph_info.edge_info_num()):
+        edge_info_item = graph_info.get_edge_info_by_index(i)
+        edge_type = edge_info_item.get_edge_type()
+
+        indices_table = f"{csr_table_name}_indices_{edge_type}"
+        indices_file = parquet_dir / f"indices_{edge_type}.parquet"
+        _write_parquet_with_icebug_metadata(con, indices_table, indices_file)
+        print(f"  Exported: {indices_table} -> {indices_file.name}")
+
+        indptr_table = f"{csr_table_name}_indptr_{edge_type}"
+        indptr_file = parquet_dir / f"indptr_{edge_type}.parquet"
+        _write_parquet_with_icebug_metadata(con, indptr_table, indptr_file)
+        print(f"  Exported: {indptr_table} -> {indptr_file.name}")
 
     # Generate schema.cypher
     schema_lines = []
 
-    # Compute storage path
-    storage_path = f"./{parquet_dir.name}/{csr_table_name}"
-
     # Generate NODE TABLE definitions
-    schema_lines = []
     for vertex_type, src_table in vertex_type_to_table.items():
         table_name = f"{csr_table_name}_{src_table}"
         try:
@@ -515,7 +500,8 @@ def convert_graphar_to_graph_std(
 
             cols_str = ", ".join(col_defs)
             schema_lines.append(
-                f"CREATE NODE TABLE {vertex_type}({cols_str}, PRIMARY KEY({pk_col})) WITH (storage = '{storage_path}');"
+                f"CREATE NODE TABLE {vertex_type}({cols_str}, PRIMARY KEY({pk_col})) "
+                f"WITH (storage = '{storage_path}', format = 'icebug-disk');"
             )
         except Exception as e:
             print(
@@ -524,14 +510,10 @@ def convert_graphar_to_graph_std(
 
     # Generate REL TABLE definitions
     for i in range(graph_info.edge_info_num()):
-        edge_info = graph_info.get_edge_info_by_index(i)
-        edge_type = edge_info.get_edge_type()
-        src_type = edge_info.get_src_type()
-        dst_type = edge_info.get_dst_type()
-        rel_name = edge_type
-
-        src_table = vertex_type_to_table.get(src_type, f"nodes_{src_type}")
-        vertex_type_to_table.get(dst_type, f"nodes_{dst_type}")
+        edge_info_item = graph_info.get_edge_info_by_index(i)
+        edge_type = edge_info_item.get_edge_type()
+        src_type = edge_info_item.get_src_type()
+        dst_type = edge_info_item.get_dst_type()
 
         indices_table = f"{csr_table_name}_indices_{edge_type}"
         try:
@@ -546,11 +528,11 @@ def convert_graphar_to_graph_std(
 
             props_str = ", ".join(col_defs)
             schema_lines.append(
-                f"CREATE REL TABLE {rel_name}(FROM {src_type} TO {dst_type}"
-                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}');"
+                f"CREATE REL TABLE {edge_type}(FROM {src_type} TO {dst_type}"
+                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}', format = 'icebug-disk');"
             )
         except Exception as e:
-            print(f"Warning: Could not generate schema for rel table {rel_name}: {e}")
+            print(f"Warning: Could not generate schema for rel table {edge_type}: {e}")
 
     schema_cypher = "\n".join(schema_lines) + "\n"
     schema_file = parquet_dir / "schema.cypher"
