@@ -1,7 +1,7 @@
 [project]
 name = "icebug-format"
 version = "0.1.0"
-description = "Convert graph data from DuckDB to CSR format for Icebug"
+description = "Convert graph data from non-CSR formats to the icebug format (CSR)."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -10,9 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 full = [
-    "real_ladybug>=0.14.1",
-    "networkx>=3.5",
-    "pandas>=2.3.2",
+    "ladybug>=0.17.0",
     "pyarrow>=21.0.0",
 ]
 graphar = [
@@ -32,6 +30,14 @@ include = ["icebug_format*"]
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
 
 [tool.uv]
 package = true
