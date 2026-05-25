@@ -199,7 +199,7 @@ def test_source_column_aliases(src_col):
     assert len(g.indices) == 1
 
 
-@pytest.mark.parametrize("dst_col", ["destination", "dest", "to"])
+@pytest.mark.parametrize("dst_col", ["target", "destination", "dest", "to"])
 def test_target_column_aliases(dst_col):
     nodes = _nodes(0, 1)
     rels = _rels([0], [1], dst_col=dst_col)
@@ -222,8 +222,25 @@ def test_src_and_dest_tables_are_passed_through():
 
 
 # ---------------------------------------------------------------------------
-# Empty graph
+# Input validation
 # ---------------------------------------------------------------------------
+
+
+def test_rel_table_with_fewer_than_two_columns_raises():
+    nodes = _nodes(0, 1)
+    bad_rels = pa.table({"source": pa.array([0], type=pa.int64())})
+    with pytest.raises(ValueError, match="at least 2 columns"):
+        convert_arrow_tables_to_csr(nodes, nodes, bad_rels)
+
+
+def test_column_names_with_spaces_are_handled():
+    nodes = pa.table({"node id": pa.array([0, 1], type=pa.int64())})
+    rels = pa.table({
+        "source": pa.array([0], type=pa.int64()),
+        "destination": pa.array([1], type=pa.int64()),
+    })
+    g = convert_arrow_tables_to_csr(nodes, nodes, rels)
+    assert len(g.indices) == 1
 
 
 def test_empty_edges_produces_zero_indptr():
