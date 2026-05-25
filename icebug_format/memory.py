@@ -23,7 +23,7 @@ def _resolve_rel_columns(schema: pa.Schema) -> tuple[str, str]:
     1st columns respectively.
 
     Source aliases (in order): source, src, from
-    Target aliases (in order): destination, dest, to
+    Target aliases (in order): target, destination, dest, to
     """
     names = schema.names
     name_set = set(names)
@@ -70,7 +70,7 @@ def convert_arrow_tables_to_csr(
     in the following priority order, falling back to positional columns:
 
     - Source: ``source`` → ``src`` → ``from`` → 0th column
-    - Target: ``destination`` → ``dest`` → ``to`` → 1st column
+    - Target: ``target`` → ``destination`` → ``dest`` → ``to`` → 1st column
 
     Any remaining columns in *rel_arrow_table* are preserved as edge
     properties in the *indices* output table.
@@ -88,6 +88,12 @@ def convert_arrow_tables_to_csr(
         passed in unchanged, and *indices*/*indptr* encode the CSR
         adjacency structure.
     """
+    if rel_arrow_table.num_columns < 2:
+        raise ValueError(
+            f"rel_arrow_table must have at least 2 columns (source and target), "
+            f"got {rel_arrow_table.num_columns}"
+        )
+
     src_pk = from_node_arrow_table.schema.names[0]
     dst_pk = to_node_arrow_table.schema.names[0]
     num_src_nodes = len(from_node_arrow_table)
@@ -99,28 +105,31 @@ def convert_arrow_tables_to_csr(
 
     select_fwd = "m1.csr_index AS csr_source, m2.csr_index AS csr_target"
     select_rev = "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
+    def q(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
     if edge_cols:
-        props = ", ".join(f"e.{c}" for c in edge_cols)
+        props = ", ".join(f"e.{q(c)}" for c in edge_cols)
         select_fwd += f", {props}"
         select_rev += f", {props}"
 
     map_cte = f"""
         src_map AS (
             SELECT row_number() OVER () - 1 AS csr_index,
-                   {src_pk} AS original_node_id
+                   {q(src_pk)} AS original_node_id
             FROM from_nodes
         ),
         dst_map AS (
             SELECT row_number() OVER () - 1 AS csr_index,
-                   {dst_pk} AS original_node_id
+                   {q(dst_pk)} AS original_node_id
             FROM to_nodes
         )
     """
 
     join_clause = f"""
         FROM edges e
-        JOIN src_map m1 ON e.{src_col} = m1.original_node_id
-        JOIN dst_map m2 ON e.{dst_col} = m2.original_node_id
+        JOIN src_map m1 ON e.{q(src_col)} = m1.original_node_id
+        JOIN dst_map m2 ON e.{q(dst_col)} = m2.original_node_id
     """
 
     if directed:
@@ -132,10 +141,10 @@ def convert_arrow_tables_to_csr(
             SELECT {select_fwd} {join_clause}
             UNION ALL
             SELECT {select_rev} {join_clause}
-            WHERE e.{src_col} != e.{dst_col}
+            WHERE e.{q(src_col)} != e.{q(dst_col)}
         """
 
-    edge_props_select = (", " + ", ".join(edge_cols)) if edge_cols else ""
+    edge_props_select = (", " + ", ".join(q(c) for c in edge_cols)) if edge_cols else ""
 
     con = duckdb.connect()
     try:
