@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -18,9 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system duckdb "pyarrow>=21"
-          uv pip install --system --no-deps -e .
-          uv pip install --system pytest
+          uv venv
+          uv sync
+          uv pip install -e .
 
       - name: Run tests
-        run: pytest
+        run: uv run --no-sync pytest

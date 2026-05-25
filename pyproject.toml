@@ -33,7 +33,7 @@ testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
+    "pytest>=7.2",
 ]
 
 [tool.uv]
