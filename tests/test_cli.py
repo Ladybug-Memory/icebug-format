@@ -93,6 +93,24 @@ def test_directed_basic():
         assert [r[0] for r in indptr] == [0, 1, 2, 2]
 
 
+def test_csr_columns_are_uint64():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = str(Path(tmpdir) / "src.duckdb")
+        out = str(Path(tmpdir) / "out.duckdb")
+        _make_source_db(src, [(0, 1), (1, 2)])
+        create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
+
+        con = duckdb.connect(out)
+        indices_desc = con.execute("DESCRIBE csr_graph_indices_edges").fetchall()
+        indptr_desc = con.execute("DESCRIBE csr_graph_indptr_edges").fetchall()
+        con.close()
+
+        indices_target_type = next(col[1] for col in indices_desc if col[0] == "target")
+        indptr_ptr_type = next(col[1] for col in indptr_desc if col[0] == "ptr")
+        assert indices_target_type == "UBIGINT"
+        assert indptr_ptr_type == "UBIGINT"
+
+
 def test_directed_preserves_self_loops():
     """Self-loops must not be filtered from directed graphs."""
     with tempfile.TemporaryDirectory() as tmpdir:

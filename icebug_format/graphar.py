@@ -398,22 +398,22 @@ def convert_graphar_to_graph_std(
         # Add leading zero
         temp_table = f"{indptr_table}_temp"
         con.execute(f"DROP TABLE IF EXISTS {temp_table}")
-        con.execute(f"CREATE TABLE {temp_table} (ptr BIGINT)")
-        con.execute(f"INSERT INTO {temp_table} VALUES (CAST(0 AS BIGINT))")
-        con.execute(f"INSERT INTO {temp_table} SELECT ptr FROM {indptr_table}")
+        con.execute(f"CREATE TABLE {temp_table} (ptr UBIGINT)")
+        con.execute(f"INSERT INTO {temp_table} VALUES (CAST(0 AS UBIGINT))")
+        con.execute(f"INSERT INTO {temp_table} SELECT CAST(ptr AS UBIGINT) FROM {indptr_table}")
         con.execute(f"DROP TABLE {indptr_table}")
         con.execute(f"ALTER TABLE {temp_table} RENAME TO {indptr_table}")
 
         # Build CSR indices
         indices_table = f"{csr_table_name}_indices_{edge_type}"
 
-        col_defs = "target BIGINT"
+        col_defs = "target UBIGINT"
         for prop in prop_cols:
             col_defs += f", {prop} BIGINT"
 
         con.execute(f"""
             CREATE TABLE {indices_table} AS
-            SELECT csr_target AS target{', ' + ', '.join(prop_cols) if prop_cols else ''}
+            SELECT CAST(csr_target AS UBIGINT) AS target{', ' + ', '.join(prop_cols) if prop_cols else ''}
             FROM {rel_table_name}
             ORDER BY csr_source, csr_target
         """)

@@ -625,9 +625,9 @@ def create_csr_graph_to_duckdb(
             # Recreate with leading zero
             con.execute(f"""
                 CREATE OR REPLACE TABLE {indptr_table} AS
-                SELECT 0::BIGINT AS ptr
+                SELECT 0::UBIGINT AS ptr
                 UNION ALL
-                SELECT ptr::int64 FROM {indptr_table}
+                SELECT ptr::UBIGINT FROM {indptr_table}
                 ORDER BY ptr;
             """)
 
@@ -639,7 +639,7 @@ def create_csr_graph_to_duckdb(
             indices_table = f"{csr_table_name}_indices_{edge_name}"
             con.execute(f"""
                 CREATE TABLE {indices_table} AS
-                SELECT csr_target AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
+                SELECT csr_target::UBIGINT AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
                 FROM relations_{edge_name}
                 ORDER BY csr_source, csr_target;
             """)
