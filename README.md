@@ -7,7 +7,7 @@ Icebug is a standardized graph format designed for efficient graph data intercha
 | **icebug-disk** | Parquet files | Object storage, persistence |
 | **icebug-memory** | Apache Arrow tables | In-process, zero-copy access |
 
-Both represent graphs in [CSR (Compressed Sparse Row)](https://en.wikipedia.org/wiki/Sparse_matrix#Compressed_sparse_row_(CSR,_CRS_or_Yale_format)) format, which enables fast adjacency-list traversal.
+Both represent *directed* graphs in [CSR (Compressed Sparse Row)](https://en.wikipedia.org/wiki/Sparse_matrix#Compressed_sparse_row_(CSR,_CRS_or_Yale_format)) format, which enables fast adjacency-list traversal.
 
 ---
 
@@ -74,13 +74,21 @@ Table: follows (FROM user TO user)
 Convert Arrow tables directly into an in-memory CSR graph
 
 ```python
-from icebug_format import IcebugMemGraph, convert_arrow_tables_to_csr
+from icebug_format import IcebugMemGraph
 
-graph: IcebugMemGraph = convert_arrow_tables_to_csr(
+# Directed heterogeneous graph (different node types on each end)
+graph: IcebugMemGraph = IcebugMemGraph.from_arrow_tables(
     from_node_arrow_table=users,   # pa.Table, first column is the primary key
-    to_node_arrow_table=cities,    # pa.Table, first column is the primary key
     rel_arrow_table=livesin,       # pa.Table with 'source' and 'target' columns
+    to_node_arrow_table=cities,    # pa.Table, first column is the primary key
     directed=True,
+)
+
+# Directed or undirected homogeneous graph (same node type on both ends)
+graph: IcebugMemGraph = IcebugMemGraph.from_arrow_tables(
+    from_node_arrow_table=users,   # pa.Table, first column is the primary key
+    rel_arrow_table=follows,       # pa.Table with 'source' and 'target' columns
+    directed=False,                 # directed=False for undirected (to_node_arrow_table must be omitted)
 )
 
 # Node tables are passed through unchanged
@@ -101,7 +109,12 @@ The `rel_arrow_table` source and target columns are resolved by name in priority
 
 Any remaining columns are preserved as edge properties in `graph.indices`.
 
-Set `directed=False` to automatically add reverse edges (undirected graph).
+Set `directed=False` to automatically add reverse edges (undirected graph).  For undirected graphs, `to_node_arrow_table` must be omitted; the same node table is used for both sides of every edge.
+
+## Caveats
+
+- icebug-format will always output a directed graph
+- If you want an undirected graph to be converted, pass direction=False to the CLI or Python API, and the reverse edges will be added automatically. But do note that undirected graphs are supported for rel tables with same node type on both ends only
 
 ---
 

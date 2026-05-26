@@ -508,6 +508,17 @@ def create_csr_graph_to_duckdb(
             src_csr_table = f"{csr_table_name}_{src_table}"
             dst_csr_table = f"{csr_table_name}_{dst_table}"
 
+            # For undirected graphs, from and to node tables must be the same.
+            if not directed:
+                if src_table != dst_table:
+                    raise ValueError(
+                        f"Undirected graphs require the same node table on both sides of an "
+                        f"edge, but edge table '{et}' connects '{src_table}' -> '{dst_table}'. "
+                        f"Use --directed for heterogeneous (bipartite) edge tables."
+                    )
+                dst_pk = src_pk
+                dst_csr_table = src_csr_table
+
             # Inline id→csr_index mapping as CTEs — no separate mapping tables needed
             map_cte = f"""
                 src_map AS (
@@ -536,11 +547,13 @@ def create_csr_graph_to_duckdb(
             if edge_cols:
                 reverse_cols += ", " + ", ".join(edge_cols)
 
+            # Self-loops are not filtered from directed graphs.
+            # For undirected graphs, the reverse UNION excludes self-loops so
+            # each self-loop appears exactly once (forward only).
             join_clause = f"""
                 FROM orig.{et} e
                 JOIN src_map m1 ON e.source = m1.original_node_id
-                JOIN dst_map m2 ON e.target = m2.original_node_id
-                WHERE e.source != e.target"""
+                JOIN dst_map m2 ON e.target = m2.original_node_id"""
 
             if limit_rels:
                 limit_per_table = limit_rels // len(edge_tables)
@@ -551,6 +564,7 @@ def create_csr_graph_to_duckdb(
                         LIMIT {limit_per_table}
                     """
                 else:
+                    # Reverse self-loops using CSR indices (already mapped)
                     rel_query = f"""
                         WITH {map_cte},
                         limited AS (
@@ -560,6 +574,7 @@ def create_csr_graph_to_duckdb(
                         SELECT * FROM limited
                         UNION ALL
                         SELECT {reverse_cols} FROM limited
+                        WHERE csr_source != csr_target
                     """
             else:
                 if directed:
@@ -573,6 +588,7 @@ def create_csr_graph_to_duckdb(
                         SELECT {select_cols} {join_clause}
                         UNION ALL
                         SELECT {reverse_select_cols} {join_clause}
+                        WHERE e.source != e.target
                     """
 
             con.execute(f"CREATE TABLE relations_{edge_name} AS {rel_query};")
