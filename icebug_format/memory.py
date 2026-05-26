@@ -60,7 +60,7 @@ class IcebugMemGraph:
         rel_arrow_table: pa.Table,
         *,
         to_node_arrow_table: pa.Table | None = None,
-        directed: bool = True,
+        undirected: bool = False,
     ) -> "IcebugMemGraph":
         """
         Convert node and relationship Arrow tables to an IcebugMemGraph.
@@ -77,10 +77,10 @@ class IcebugMemGraph:
         Any remaining columns in *rel_arrow_table* are preserved as edge
         properties in the *indices* output table.
 
-        For undirected graphs (``directed=False``), ``to_node_arrow_table`` must
+        For undirected graphs (``undirected=True``), ``to_node_arrow_table`` must
         not be provided: the from-node table is used for both sides of every
         edge.  Providing ``to_node_arrow_table`` while also passing
-        ``directed=False`` raises ``ValueError``.
+        ``undirected=True`` raises ``ValueError``.
 
         Args:
             from_node_arrow_table: Source node table.
@@ -88,8 +88,8 @@ class IcebugMemGraph:
             to_node_arrow_table:   Destination node table (directed graphs only).
                                    Defaults to *from_node_arrow_table* when
                                    ``None`` (i.e., homogeneous edges).
-            directed:              If ``True`` (default), only forward edges are
-                                   stored.  If ``False``, reverse edges are added
+            undirected:            If ``False`` (default), only forward edges are
+                                   stored.  If ``True``, reverse edges are added
                                    so the graph is treated as undirected.
 
         Returns:
@@ -98,11 +98,11 @@ class IcebugMemGraph:
 
         Raises:
             ValueError: If *rel_arrow_table* has fewer than 2 columns.
-            ValueError: If ``directed=False`` and *to_node_arrow_table* is
+            ValueError: If ``undirected=True`` and *to_node_arrow_table* is
                         provided (undirected graphs always use a single node
                         table for both sides).
         """
-        if not directed and to_node_arrow_table is not None:
+        if undirected and to_node_arrow_table is not None:
             raise ValueError(
                 "to_node_arrow_table must not be provided for undirected graphs; "
                 "from and to node tables are always the same for undirected edges."
@@ -155,7 +155,7 @@ class IcebugMemGraph:
             JOIN dst_map m2 ON e.{q(dst_col)} = m2.original_node_id
         """
 
-        if directed:
+        if not undirected:
             rel_query = f"WITH {map_cte} SELECT {select_fwd} {join_clause}"
         else:
             # Self-loops appear once (forward only); non-self edges get both directions.

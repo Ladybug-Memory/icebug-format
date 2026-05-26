@@ -385,7 +385,7 @@ def create_csr_graph_to_duckdb(
     source_db_path: str,
     output_db_path: str,
     limit_rels: int | None = None,
-    directed: bool = False,
+    undirected: bool = False,
     csr_table_name: str = "csr_graph",
     node_table: str | None = None,
     edge_table: str | None = None,
@@ -400,7 +400,7 @@ def create_csr_graph_to_duckdb(
         source_db_path: Path to source DuckDB with edges table
         output_db_path: Path to output DuckDB for CSR data
         limit_rels: Limit number of relationships for testing
-        directed: Whether graph is directed
+        undirected: Whether graph is undirected
         csr_table_name: Name of table to store CSR data
         node_table: Specific node table to use (default: auto-discover)
         edge_table: Specific edge table to use (default: auto-discover)
@@ -509,12 +509,12 @@ def create_csr_graph_to_duckdb(
             dst_csr_table = f"{csr_table_name}_{dst_table}"
 
             # For undirected graphs, from and to node tables must be the same.
-            if not directed:
+            if undirected:
                 if src_table != dst_table:
                     raise ValueError(
                         f"Undirected graphs require the same node table on both sides of an "
                         f"edge, but edge table '{et}' connects '{src_table}' -> '{dst_table}'. "
-                        f"Use --directed for heterogeneous (bipartite) edge tables."
+                        f"Use --undirected for homogeneous edge tables."
                     )
                 dst_pk = src_pk
                 dst_csr_table = src_csr_table
@@ -557,7 +557,7 @@ def create_csr_graph_to_duckdb(
 
             if limit_rels:
                 limit_per_table = limit_rels // len(edge_tables)
-                if directed:
+                if not undirected:
                     rel_query = f"""
                         WITH {map_cte}
                         SELECT {select_cols} {join_clause}
@@ -577,7 +577,7 @@ def create_csr_graph_to_duckdb(
                         WHERE csr_source != csr_target
                     """
             else:
-                if directed:
+                if not undirected:
                     rel_query = f"""
                         WITH {map_cte}
                         SELECT {select_cols} {join_clause}
@@ -730,9 +730,9 @@ def main():
         help="Number of edges to use in test mode (default: 50000)",
     )
     parser.add_argument(
-        "--directed",
+        "--undirected",
         action="store_true",
-        help="Treat graph as directed (default: undirected)",
+        help="Treat graph as undirected (default: directed)",
     )
     parser.add_argument(
         "--storage",
@@ -773,7 +773,7 @@ def main():
         print(f"GraphAr directory: {args.graphar}")
         print(f"CSR output database: {args.output_db}")
         print(f"CSR table prefix: {args.csr_table}")
-        print(f"Directed: {args.directed}")
+        print(f"Undirected: {args.undirected}")
         print(f"DuckDB memory limit: {args.memory_limit}")
 
         try:
@@ -788,7 +788,7 @@ def main():
             graphar_dir=args.graphar,
             output_db_path=args.output_db,
             csr_table_name=args.csr_table,
-            directed=args.directed,
+            undirected=args.undirected,
             memory_limit=args.memory_limit,
         )
 
@@ -812,7 +812,7 @@ def main():
     print(f"Source database: {source_db_path}")
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
-    print(f"Directed: {args.directed}")
+    print(f"Undirected: {args.undirected}")
     print(f"DuckDB memory limit: {args.memory_limit}")
 
     # Compute default storage path from output_db if not specified
@@ -832,7 +832,7 @@ def main():
         source_db_path=source_db_path,
         output_db_path=args.output_db,
         limit_rels=test_limit,
-        directed=args.directed,
+        undirected=args.undirected,
         csr_table_name=args.csr_table,
         node_table=args.node_table,
         edge_table=args.edge_table,

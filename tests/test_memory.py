@@ -123,7 +123,7 @@ def test_undirected_adds_reverse_edges():
     # Graph: 0 -- 1
     nodes = _nodes(0, 1)
     rels = _rels([0], [1])
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, directed=False)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
 
     assert len(g.indices) == 2
     targets = sorted(g.indices["target"].to_pylist())
@@ -134,7 +134,7 @@ def test_undirected_indptr_reflects_bidirectional_degree():
     # 0 -- 1 -- 2
     nodes = _nodes(0, 1, 2)
     rels = _rels([0, 1], [1, 2])
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, directed=False)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
 
     ptr = g.indptr["ptr"].to_pylist()
     # node 0: 1 neighbour, node 1: 2 neighbours, node 2: 1 neighbour
@@ -149,7 +149,7 @@ def test_undirected_indptr_reflects_bidirectional_degree():
 def test_self_loops_appear_once_in_undirected_graph():
     nodes = _nodes(0, 1)
     rels = _rels([0, 0], [0, 1])  # 0->0 self-loop + 0->1
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, directed=False)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
 
     # 0->0 (once), 0->1, 1->0  → 3 entries total
     assert len(g.indices) == 3
@@ -254,7 +254,7 @@ def test_undirected_with_to_node_table_raises():
     nodes = _nodes(0, 1)
     rels = _rels([0], [1])
     with pytest.raises(ValueError, match="to_node_arrow_table must not be provided"):
-        IcebugMemGraph.from_arrow_tables(nodes, rels, to_node_arrow_table=nodes, directed=False)
+        IcebugMemGraph.from_arrow_tables(nodes, rels, to_node_arrow_table=nodes, undirected=True)
 
 
 def test_column_names_with_spaces_are_handled():

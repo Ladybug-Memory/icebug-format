@@ -157,7 +157,7 @@ def convert_graphar_to_graph_std(
     graphar_dir: str,
     output_db_path: str,
     csr_table_name: str = "graph",
-    directed: bool = False,
+    undirected: bool = False,
     memory_limit: str = "80%",
 ) -> None:
     """
@@ -167,7 +167,7 @@ def convert_graphar_to_graph_std(
         graphar_dir: Path to directory with GraphAr data
         output_db_path: Path to output DuckDB database
         csr_table_name: Name prefix for CSR tables
-        directed: Whether graph is directed
+        undirected: Whether graph is undirected
         memory_limit: DuckDB memory limit setting
     """
     print("\n=== Converting GraphAr to Graph-Std Format ===")
@@ -569,9 +569,9 @@ def main():
         help="Table name prefix for CSR data (default: graph)",
     )
     parser.add_argument(
-        "--directed",
+        "--undirected",
         action="store_true",
-        help="Treat graph as directed (default: undirected)",
+        help="Treat graph as undirected (default: directed)",
     )
 
     args = parser.parse_args()
@@ -580,13 +580,13 @@ def main():
     print(f"GraphAr directory: {args.graphar_dir}")
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
-    print(f"Directed: {args.directed}")
+    print(f"Undirected: {args.undirected}")
 
     convert_graphar_to_graph_std(
         graphar_dir=args.graphar_dir,
         output_db_path=args.output_db,
         csr_table_name=args.csr_table,
-        directed=args.directed,
+        undirected=args.undirected,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
