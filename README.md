@@ -113,6 +113,7 @@ Use `--add-reverse-edges` in the CLI, or `add_reverse_edges=True` in the Python 
 
 - icebug-format will always output a directed graph
 - If an algorithm needs symmetric adjacency, pass `--add-reverse-edges` to the CLI or `add_reverse_edges=True` to the Python API. Reverse edges will be added automatically. Reverse-edge expansion is supported only for rel tables with the same node type on both ends.
+- Reverse-edge expansion is all or nothing for a conversion. If your graph mixes edge types that should be symmetric, such as `friends`, with edge types that should stay directed, such as `follows`, run separate conversions or add reverse edges before calling icebug-format; `--add-reverse-edges` cannot be applied selectively per edge type.
 
 ---
 
