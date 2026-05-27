@@ -1,7 +1,7 @@
 [project]
 name = "icebug-format"
-version = "0.1.0"
-description = "Convert graph data from non-CSR formats to the icebug format (CSR)."
+version = "1.0.0"
+description = "Convert graph data from relational formats to icebug format."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -18,8 +18,8 @@ graphar = [
 icebug-format = "icebug_format:main"
 
 [project.urls]
-Homepage = "https://github.com/anomalyco/icebug-format"
-Repository = "https://github.com/anomalyco/icebug-format"
+Homepage = "https://github.com/Ladybug-Memory/icebug-format"
+Repository = "https://github.com/Ladybug-Memory/icebug-format"
 PyPI = "https://pypi.org/project/icebug-format"
 
 [tool.setuptools.packages.find]
