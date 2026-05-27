@@ -346,8 +346,10 @@ def convert_graphar_to_graph_std(
             con.execute(f"CREATE TABLE {rel_table_name} ({col_defs})")
 
             def insert_relation(values):
+                placeholders = ", ".join(["?"] * len(values))
                 con.execute(
-                    f"INSERT INTO {rel_table_name} VALUES ({', '.join(str(v) for v in values)})"
+                    f"INSERT INTO {rel_table_name} VALUES ({placeholders})",
+                    values,
                 )
 
             # Insert edges with properties
@@ -372,11 +374,13 @@ def convert_graphar_to_graph_std(
             )
             for src_idx, dst_idx in edges_list:
                 con.execute(
-                    f"INSERT INTO {rel_table_name} VALUES ({src_idx}, {dst_idx})"
+                    f"INSERT INTO {rel_table_name} VALUES (?, ?)",
+                    [src_idx, dst_idx],
                 )
                 if add_reverse_edges and src_idx != dst_idx:
                     con.execute(
-                        f"INSERT INTO {rel_table_name} VALUES ({dst_idx}, {src_idx})"
+                        f"INSERT INTO {rel_table_name} VALUES (?, ?)",
+                        [dst_idx, src_idx],
                     )
 
         # Build CSR indptr
