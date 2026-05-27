@@ -34,18 +34,19 @@ import re
 from pathlib import Path
 
 import duckdb
-import pyarrow.parquet as pq
 
 ICEBUG_DISK_VERSION = "v1"
 
 
 def _write_parquet_with_icebug_metadata(con, table_name: str, output_path: Path) -> None:
     """Export a DuckDB table to parquet with icebug_disk_version metadata."""
-    arrow_table = con.execute(f"SELECT * FROM {table_name}").arrow().read_all()
-    existing_metadata = arrow_table.schema.metadata or {}
-    new_metadata = {**existing_metadata, b"icebug_disk_version": ICEBUG_DISK_VERSION.encode()}
-    arrow_table = arrow_table.replace_schema_metadata(new_metadata)
-    pq.write_table(arrow_table, str(output_path))
+    con.execute(
+        f"""
+        COPY {table_name} TO ?
+        (FORMAT PARQUET, KV_METADATA {{ icebug_disk_version: '{ICEBUG_DISK_VERSION}' }})
+        """,
+        [str(output_path)],
+    )
 
 
 def parse_schema_cypher(schema_path: Path) -> dict:
