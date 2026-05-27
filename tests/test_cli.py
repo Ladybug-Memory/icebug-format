@@ -83,7 +83,7 @@ def test_directed_basic():
         out = str(Path(tmpdir) / "out.duckdb")
         # 0 -> 1 -> 2
         _make_source_db(src, [(0, 1), (1, 2)])
-        create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=False, memory_limit=_MEM)
 
         con = duckdb.connect(out)
         indices = con.execute(
@@ -92,10 +92,16 @@ def test_directed_basic():
         indptr = con.execute(
             "SELECT ptr FROM csr_graph_indptr_edges ORDER BY rowid"
         ).fetchall()
+        metadata = con.execute(
+            "SELECT CAST(value AS VARCHAR) FROM parquet_kv_metadata(?) "
+            "WHERE key = 'icebug_disk_version'",
+            [str(_parquet_dir(out) / "indices_edges.parquet")],
+        ).fetchone()
         con.close()
 
         assert [r[0] for r in indices] == [1, 2]
         assert [r[0] for r in indptr] == [0, 1, 2, 2]
+        assert metadata == ("v1",)
 
 
 def test_csr_columns_are_uint64():
@@ -103,7 +109,7 @@ def test_csr_columns_are_uint64():
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
         _make_source_db(src, [(0, 1), (1, 2)])
-        create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=False, memory_limit=_MEM)
 
         con = duckdb.connect(out)
         indices_desc = con.execute("DESCRIBE csr_graph_indices_edges").fetchall()
@@ -123,7 +129,7 @@ def test_directed_preserves_self_loops():
         out = str(Path(tmpdir) / "out.duckdb")
         # 0->0 (self-loop) + 0->1
         _make_source_db(src, [(0, 0), (0, 1)])
-        create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=False, memory_limit=_MEM)
 
         con = duckdb.connect(out)
         indices = con.execute(
@@ -135,17 +141,17 @@ def test_directed_preserves_self_loops():
 
 
 # ---------------------------------------------------------------------------
-# Undirected graph
+# Reverse-edge expansion
 # ---------------------------------------------------------------------------
 
 
-def test_undirected_adds_reverse_edges():
+def test_add_reverse_edges_adds_reverse_edges():
     with tempfile.TemporaryDirectory() as tmpdir:
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
         # 0 -- 1
         _make_source_db(src, [(0, 1)])
-        create_csr_graph_to_duckdb(src, out, undirected=True, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=True, memory_limit=_MEM)
 
         con = duckdb.connect(out)
         count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
@@ -156,14 +162,14 @@ def test_undirected_adds_reverse_edges():
         assert count == 2  # forward + reverse
 
 
-def test_undirected_self_loop_appears_once():
-    """Self-loops in an undirected graph must appear exactly once."""
+def test_add_reverse_edges_self_loop_appears_once():
+    """Self-loops must appear exactly once when reverse edges are added."""
     with tempfile.TemporaryDirectory() as tmpdir:
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
         # 0->0 self-loop + 0->1
         _make_source_db(src, [(0, 0), (0, 1)])
-        create_csr_graph_to_duckdb(src, out, undirected=True, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=True, memory_limit=_MEM)
 
         con = duckdb.connect(out)
         count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
@@ -176,12 +182,12 @@ def test_undirected_self_loop_appears_once():
 
 
 # ---------------------------------------------------------------------------
-# Undirected validation
+# Reverse-edge validation
 # ---------------------------------------------------------------------------
 
 
-def test_undirected_heterogeneous_edges_raise():
-    """Undirected graphs must not have heterogeneous (bipartite) edge tables."""
+def test_add_reverse_edges_heterogeneous_edges_raise():
+    """Reverse-edge expansion requires homogeneous edge tables."""
     with tempfile.TemporaryDirectory() as tmpdir:
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
@@ -196,7 +202,7 @@ def test_undirected_heterogeneous_edges_raise():
             create_csr_graph_to_duckdb(
                 src,
                 out,
-                undirected=True,
+                add_reverse_edges=True,
                 schema_path=str(schema_path),
                 memory_limit=_MEM,
             )
@@ -215,7 +221,7 @@ def test_limit_rels_caps_edge_count():
         # 10 edges: 0->1, 1->2, ..., 9->10
         _make_source_db(src, [(i, i + 1) for i in range(10)])
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, limit_rels=3, memory_limit=_MEM
+            src, out, add_reverse_edges=False, limit_rels=3, memory_limit=_MEM
         )
 
         con = duckdb.connect(out)
@@ -227,15 +233,15 @@ def test_limit_rels_caps_edge_count():
         assert count <= 3
 
 
-def test_limit_rels_undirected_adds_reverse_within_limit():
-    """For undirected graphs, limit_rels applies to forward edges; reverse are added after."""
+def test_limit_rels_add_reverse_edges_adds_reverse_within_limit():
+    """limit_rels applies before reverse edges are added."""
     with tempfile.TemporaryDirectory() as tmpdir:
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
         # 6 distinct edges: 0-1, 1-2, 2-3, 3-4, 4-5, 5-0
         _make_source_db(src, [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
         create_csr_graph_to_duckdb(
-            src, out, undirected=True, limit_rels=2, memory_limit=_MEM
+            src, out, add_reverse_edges=True, limit_rels=2, memory_limit=_MEM
         )
 
         con = duckdb.connect(out)
@@ -260,7 +266,11 @@ def test_csr_table_name_prefix():
         out = str(Path(tmpdir) / "out.duckdb")
         _make_source_db(src, [(0, 1), (1, 2)])
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, csr_table_name="mygraph", memory_limit=_MEM
+            src,
+            out,
+            add_reverse_edges=False,
+            csr_table_name="mygraph",
+            memory_limit=_MEM,
         )
 
         con = duckdb.connect(out)
@@ -286,7 +296,11 @@ def test_node_table_selects_single_table():
         out = str(Path(tmpdir) / "out.duckdb")
         _make_multi_node_source_db(src)
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, node_table="nodes_user", memory_limit=_MEM
+            src,
+            out,
+            add_reverse_edges=False,
+            node_table="nodes_user",
+            memory_limit=_MEM,
         )
 
         con = duckdb.connect(out)
@@ -304,7 +318,11 @@ def test_edge_table_selects_single_table():
         out = str(Path(tmpdir) / "out.duckdb")
         _make_multi_edge_source_db(src)
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, edge_table="edges_follows", memory_limit=_MEM
+            src,
+            out,
+            add_reverse_edges=False,
+            edge_table="edges_follows",
+            memory_limit=_MEM,
         )
 
         con = duckdb.connect(out)
@@ -325,7 +343,7 @@ def test_edge_table_not_found_raises():
             create_csr_graph_to_duckdb(
                 src,
                 out,
-                undirected=False,
+                add_reverse_edges=False,
                 edge_table="edges_nonexistent",
                 memory_limit=_MEM,
             )
@@ -349,7 +367,11 @@ def test_schema_path_maps_from_to_node_types():
         )
 
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, schema_path=str(schema_path), memory_limit=_MEM
+            src,
+            out,
+            add_reverse_edges=False,
+            schema_path=str(schema_path),
+            memory_limit=_MEM,
         )
 
         out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
@@ -371,7 +393,7 @@ def test_storage_path_appears_in_schema_cypher():
         create_csr_graph_to_duckdb(
             src,
             out,
-            undirected=False,
+            add_reverse_edges=False,
             storage_path="./my_custom_store",
             memory_limit=_MEM,
         )
@@ -387,7 +409,7 @@ def test_storage_path_default_uses_output_stem():
         out = str(Path(tmpdir) / "out.duckdb")
         _make_source_db(src, [(0, 1)])
 
-        create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(src, out, add_reverse_edges=False, memory_limit=_MEM)
 
         out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
         # Default storage_path is "./out" (stem of out.duckdb)

@@ -23,7 +23,10 @@ from pathlib import Path
 import duckdb
 import pyarrow.parquet as pq
 
-from icebug_format.cli import ICEBUG_DISK_VERSION, _write_parquet_with_icebug_metadata, set_memory_limit
+from icebug_format.cli import (
+    _write_parquet_with_icebug_metadata,
+    set_memory_limit,
+)
 
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
@@ -157,7 +160,7 @@ def convert_graphar_to_graph_std(
     graphar_dir: str,
     output_db_path: str,
     csr_table_name: str = "graph",
-    undirected: bool = False,
+    add_reverse_edges: bool = False,
     memory_limit: str = "80%",
 ) -> None:
     """
@@ -167,7 +170,7 @@ def convert_graphar_to_graph_std(
         graphar_dir: Path to directory with GraphAr data
         output_db_path: Path to output DuckDB database
         csr_table_name: Name prefix for CSR tables
-        undirected: Whether graph is undirected
+        add_reverse_edges: Whether to add reverse edges for symmetric adjacency
         memory_limit: DuckDB memory limit setting
     """
     print("\n=== Converting GraphAr to Graph-Std Format ===")
@@ -208,24 +211,12 @@ def convert_graphar_to_graph_std(
 
         # Find property group directories and read data (directories start with _)
         vertex_rows = []
-        prop_group_names = []
 
         for item in vertex_dir.iterdir():
             if item.is_dir() and item.name.startswith("_"):
                 for chunk_file in sorted(item.iterdir()):
                     if chunk_file.is_file():
                         table = pq.read_table(str(chunk_file))
-                        if not vertex_rows:
-                            prop_group_names = [
-                                table.schema.field(j).name
-                                for j in range(table.num_columns)
-                            ]
-                            {
-                                table.schema.field(j).name: str(
-                                    table.schema.field(j).type
-                                )
-                                for j in range(table.num_columns)
-                            }
                         for i in range(table.num_rows):
                             row = {
                                 table.schema.field(j).name: table.column(j)[i].as_py()
@@ -280,6 +271,13 @@ def convert_graphar_to_graph_std(
         if not src_table or not dst_table:
             print(f"    Warning: Missing node tables for {src_type} -> {dst_type}")
             continue
+
+        if add_reverse_edges and src_type != dst_type:
+            raise ValueError(
+                f"Adding reverse edges requires the same node type on both sides of an "
+                f"edge, but edge type '{edge_type}' connects '{src_type}' -> '{dst_type}'. "
+                f"Use --add-reverse-edges only for homogeneous edge types."
+            )
 
         # Get vertex counts
         num_src_nodes = con.execute(f"SELECT COUNT(*) FROM {src_table}").fetchone()[0]
@@ -347,6 +345,11 @@ def convert_graphar_to_graph_std(
 
             con.execute(f"CREATE TABLE {rel_table_name} ({col_defs})")
 
+            def insert_relation(values):
+                con.execute(
+                    f"INSERT INTO {rel_table_name} VALUES ({', '.join(str(v) for v in values)})"
+                )
+
             # Insert edges with properties
             for i, (src_idx, dst_idx) in enumerate(edges_list):
                 values = [src_idx, dst_idx]
@@ -360,9 +363,9 @@ def convert_graphar_to_graph_std(
                         )
                         values.extend(prop_vals)
 
-                con.execute(
-                    f"INSERT INTO {rel_table_name} VALUES ({', '.join(str(v) for v in values)})"
-                )
+                insert_relation(values)
+                if add_reverse_edges and src_idx != dst_idx:
+                    insert_relation([dst_idx, src_idx, *values[2:]])
         else:
             con.execute(
                 f"CREATE TABLE {rel_table_name} (csr_source BIGINT, csr_target BIGINT)"
@@ -371,6 +374,10 @@ def convert_graphar_to_graph_std(
                 con.execute(
                     f"INSERT INTO {rel_table_name} VALUES ({src_idx}, {dst_idx})"
                 )
+                if add_reverse_edges and src_idx != dst_idx:
+                    con.execute(
+                        f"INSERT INTO {rel_table_name} VALUES ({dst_idx}, {src_idx})"
+                    )
 
         # Build CSR indptr
         indptr_table = f"{csr_table_name}_indptr_{edge_type}"
@@ -400,7 +407,9 @@ def convert_graphar_to_graph_std(
         con.execute(f"DROP TABLE IF EXISTS {temp_table}")
         con.execute(f"CREATE TABLE {temp_table} (ptr UBIGINT)")
         con.execute(f"INSERT INTO {temp_table} VALUES (CAST(0 AS UBIGINT))")
-        con.execute(f"INSERT INTO {temp_table} SELECT CAST(ptr AS UBIGINT) FROM {indptr_table}")
+        con.execute(
+            f"INSERT INTO {temp_table} SELECT CAST(ptr AS UBIGINT) FROM {indptr_table}"
+        )
         con.execute(f"DROP TABLE {indptr_table}")
         con.execute(f"ALTER TABLE {temp_table} RENAME TO {indptr_table}")
 
@@ -569,9 +578,10 @@ def main():
         help="Table name prefix for CSR data (default: graph)",
     )
     parser.add_argument(
-        "--undirected",
+        "--add-reverse-edges",
+        dest="add_reverse_edges",
         action="store_true",
-        help="Treat graph as undirected (default: directed)",
+        help="Add reverse edges for symmetric adjacency (default: preserve input direction)",
     )
 
     args = parser.parse_args()
@@ -580,13 +590,13 @@ def main():
     print(f"GraphAr directory: {args.graphar_dir}")
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
-    print(f"Undirected: {args.undirected}")
+    print(f"Add reverse edges: {args.add_reverse_edges}")
 
     convert_graphar_to_graph_std(
         graphar_dir=args.graphar_dir,
         output_db_path=args.output_db,
         csr_table_name=args.csr_table,
-        undirected=args.undirected,
+        add_reverse_edges=args.add_reverse_edges,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
