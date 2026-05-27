@@ -38,7 +38,9 @@ import duckdb
 ICEBUG_DISK_VERSION = "v1"
 
 
-def _write_parquet_with_icebug_metadata(con, table_name: str, output_path: Path) -> None:
+def _write_parquet_with_icebug_metadata(
+    con, table_name: str, output_path: Path
+) -> None:
     """Export a DuckDB table to parquet with icebug_disk_version metadata."""
     con.execute(
         f"""
@@ -341,7 +343,7 @@ def export_to_parquet_and_cypher(
         if table_name == prefix:
             return prefix
         if table_name.startswith(f"{prefix}_"):
-            return table_name[len(prefix) + 1:].lower()
+            return table_name[len(prefix) + 1 :].lower()
         return table_name.lower()
 
     # Export node tables: nodes_<display_name>.parquet
@@ -355,7 +357,9 @@ def export_to_parquet_and_cypher(
     # Export edge tables: indices_<edge_name>.parquet, indptr_<edge_name>.parquet
     for edge_table in edge_tables:
         edge_name = (
-            edge_table[6:].lower() if edge_table.startswith("edges_") else edge_table.lower()
+            edge_table[6:].lower()
+            if edge_table.startswith("edges_")
+            else edge_table.lower()
         )
         indices_table = f"{csr_table_name}_indices_{edge_name}"
         indices_file = parquet_dir / f"indices_{edge_name}.parquet"
@@ -396,7 +400,7 @@ def create_csr_graph_to_duckdb(
     source_db_path: str,
     output_db_path: str,
     limit_rels: int | None = None,
-    undirected: bool = False,
+    add_reverse_edges: bool = False,
     csr_table_name: str = "csr_graph",
     node_table: str | None = None,
     edge_table: str | None = None,
@@ -411,7 +415,7 @@ def create_csr_graph_to_duckdb(
         source_db_path: Path to source DuckDB with edges table
         output_db_path: Path to output DuckDB for CSR data
         limit_rels: Limit number of relationships for testing
-        undirected: Whether graph is undirected
+        add_reverse_edges: Whether to add reverse edges for symmetric adjacency
         csr_table_name: Name of table to store CSR data
         node_table: Specific node table to use (default: auto-discover)
         edge_table: Specific edge table to use (default: auto-discover)
@@ -501,14 +505,18 @@ def create_csr_graph_to_duckdb(
 
         for et in edge_tables:
             edge_name = et[6:].lower() if et.startswith("edges_") else et.lower()
-            src_node_type, dst_node_type = edge_relationships.get(edge_name, (None, None))
+            src_node_type, dst_node_type = edge_relationships.get(
+                edge_name, (None, None)
+            )
 
             src_table = node_type_to_table.get(src_node_type)
             dst_table = node_type_to_table.get(dst_node_type)
 
             if src_table and dst_table:
                 num_src_nodes = node_counts.get(src_table, 0)
-                print(f"\n  Processing {et}: {src_node_type} ({num_src_nodes} nodes) -> {dst_node_type}")
+                print(
+                    f"\n  Processing {et}: {src_node_type} ({num_src_nodes} nodes) -> {dst_node_type}"
+                )
             else:
                 src_table = dst_table = node_tables[0] if node_tables else "nodes"
                 num_src_nodes = node_counts.get(src_table, 0)
@@ -519,13 +527,13 @@ def create_csr_graph_to_duckdb(
             src_csr_table = f"{csr_table_name}_{src_table}"
             dst_csr_table = f"{csr_table_name}_{dst_table}"
 
-            # For undirected graphs, from and to node tables must be the same.
-            if undirected:
+            # Reverse-edge expansion requires one node mapping for both endpoints.
+            if add_reverse_edges:
                 if src_table != dst_table:
                     raise ValueError(
-                        f"Undirected graphs require the same node table on both sides of an "
+                        f"Adding reverse edges requires the same node table on both sides of an "
                         f"edge, but edge table '{et}' connects '{src_table}' -> '{dst_table}'. "
-                        f"Use --undirected for homogeneous edge tables."
+                        f"Use --add-reverse-edges only for homogeneous edge tables."
                     )
                 dst_pk = src_pk
                 dst_csr_table = src_csr_table
@@ -551,16 +559,17 @@ def create_csr_graph_to_duckdb(
             select_cols = "m1.csr_index AS csr_source, m2.csr_index AS csr_target"
             if edge_cols:
                 select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
-            reverse_select_cols = "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
+            reverse_select_cols = (
+                "m2.csr_index AS csr_source, m1.csr_index AS csr_target"
+            )
             if edge_cols:
                 reverse_select_cols += ", " + ", ".join([f"e.{c}" for c in edge_cols])
             reverse_cols = "csr_target AS csr_source, csr_source AS csr_target"
             if edge_cols:
                 reverse_cols += ", " + ", ".join(edge_cols)
 
-            # Self-loops are not filtered from directed graphs.
-            # For undirected graphs, the reverse UNION excludes self-loops so
-            # each self-loop appears exactly once (forward only).
+            # Self-loops are not filtered. Reverse-edge expansion excludes
+            # self-loops so each self-loop appears exactly once (forward only).
             join_clause = f"""
                 FROM orig.{et} e
                 JOIN src_map m1 ON e.source = m1.original_node_id
@@ -568,14 +577,13 @@ def create_csr_graph_to_duckdb(
 
             if limit_rels:
                 limit_per_table = limit_rels // len(edge_tables)
-                if not undirected:
+                if not add_reverse_edges:
                     rel_query = f"""
                         WITH {map_cte}
                         SELECT {select_cols} {join_clause}
                         LIMIT {limit_per_table}
                     """
                 else:
-                    # Reverse self-loops using CSR indices (already mapped)
                     rel_query = f"""
                         WITH {map_cte},
                         limited AS (
@@ -588,7 +596,7 @@ def create_csr_graph_to_duckdb(
                         WHERE csr_source != csr_target
                     """
             else:
-                if not undirected:
+                if not add_reverse_edges:
                     rel_query = f"""
                         WITH {map_cte}
                         SELECT {select_cols} {join_clause}
@@ -741,9 +749,10 @@ def main():
         help="Number of edges to use in test mode (default: 50000)",
     )
     parser.add_argument(
-        "--undirected",
+        "--add-reverse-edges",
+        dest="add_reverse_edges",
         action="store_true",
-        help="Treat graph as undirected (default: directed)",
+        help="Add reverse edges for symmetric adjacency (default: preserve input direction)",
     )
     parser.add_argument(
         "--storage",
@@ -784,7 +793,7 @@ def main():
         print(f"GraphAr directory: {args.graphar}")
         print(f"CSR output database: {args.output_db}")
         print(f"CSR table prefix: {args.csr_table}")
-        print(f"Undirected: {args.undirected}")
+        print(f"Add reverse edges: {args.add_reverse_edges}")
         print(f"DuckDB memory limit: {args.memory_limit}")
 
         try:
@@ -799,7 +808,7 @@ def main():
             graphar_dir=args.graphar,
             output_db_path=args.output_db,
             csr_table_name=args.csr_table,
-            undirected=args.undirected,
+            add_reverse_edges=args.add_reverse_edges,
             memory_limit=args.memory_limit,
         )
 
@@ -823,7 +832,7 @@ def main():
     print(f"Source database: {source_db_path}")
     print(f"CSR output database: {args.output_db}")
     print(f"CSR table prefix: {args.csr_table}")
-    print(f"Undirected: {args.undirected}")
+    print(f"Add reverse edges: {args.add_reverse_edges}")
     print(f"DuckDB memory limit: {args.memory_limit}")
 
     # Compute default storage path from output_db if not specified
@@ -843,7 +852,7 @@ def main():
         source_db_path=source_db_path,
         output_db_path=args.output_db,
         limit_rels=test_limit,
-        undirected=args.undirected,
+        add_reverse_edges=args.add_reverse_edges,
         csr_table_name=args.csr_table,
         node_table=args.node_table,
         edge_table=args.edge_table,

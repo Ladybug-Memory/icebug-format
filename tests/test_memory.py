@@ -115,26 +115,26 @@ def test_directed_preserves_self_loops():
 
 
 # ---------------------------------------------------------------------------
-# Undirected graph
+# Reverse-edge expansion
 # ---------------------------------------------------------------------------
 
 
-def test_undirected_adds_reverse_edges():
+def test_add_reverse_edges_adds_reverse_edges():
     # Graph: 0 -- 1
     nodes = _nodes(0, 1)
     rels = _rels([0], [1])
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, add_reverse_edges=True)
 
     assert len(g.indices) == 2
     targets = sorted(g.indices["target"].to_pylist())
     assert targets == [0, 1]
 
 
-def test_undirected_indptr_reflects_bidirectional_degree():
+def test_add_reverse_edges_indptr_reflects_bidirectional_degree():
     # 0 -- 1 -- 2
     nodes = _nodes(0, 1, 2)
     rels = _rels([0, 1], [1, 2])
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, add_reverse_edges=True)
 
     ptr = g.indptr["ptr"].to_pylist()
     # node 0: 1 neighbour, node 1: 2 neighbours, node 2: 1 neighbour
@@ -146,10 +146,11 @@ def test_undirected_indptr_reflects_bidirectional_degree():
 # Self-loop handling
 # ---------------------------------------------------------------------------
 
-def test_self_loops_appear_once_in_undirected_graph():
+
+def test_self_loops_appear_once_with_reverse_edges():
     nodes = _nodes(0, 1)
     rels = _rels([0, 0], [0, 1])  # 0->0 self-loop + 0->1
-    g = IcebugMemGraph.from_arrow_tables(nodes, rels, undirected=True)
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, add_reverse_edges=True)
 
     # 0->0 (once), 0->1, 1->0  → 3 entries total
     assert len(g.indices) == 3
@@ -222,8 +223,12 @@ def test_target_column_aliases(dst_col):
 
 
 def test_src_and_dest_tables_are_passed_through():
-    src_nodes = pa.table({"id": pa.array([10, 20], type=pa.int64()), "label": pa.array(["a", "b"])})
-    dst_nodes = pa.table({"id": pa.array([10, 20], type=pa.int64()), "label": pa.array(["c", "d"])})
+    src_nodes = pa.table(
+        {"id": pa.array([10, 20], type=pa.int64()), "label": pa.array(["a", "b"])}
+    )
+    dst_nodes = pa.table(
+        {"id": pa.array([10, 20], type=pa.int64()), "label": pa.array(["c", "d"])}
+    )
     rels = _rels([10], [20])
     g = IcebugMemGraph.from_arrow_tables(src_nodes, rels, to_node_arrow_table=dst_nodes)
     assert g.src.equals(src_nodes)
@@ -250,19 +255,23 @@ def test_rel_table_with_fewer_than_two_columns_raises():
         IcebugMemGraph.from_arrow_tables(nodes, bad_rels)
 
 
-def test_undirected_with_to_node_table_raises():
+def test_add_reverse_edges_with_to_node_table_raises():
     nodes = _nodes(0, 1)
     rels = _rels([0], [1])
     with pytest.raises(ValueError, match="to_node_arrow_table must not be provided"):
-        IcebugMemGraph.from_arrow_tables(nodes, rels, to_node_arrow_table=nodes, undirected=True)
+        IcebugMemGraph.from_arrow_tables(
+            nodes, rels, to_node_arrow_table=nodes, add_reverse_edges=True
+        )
 
 
 def test_column_names_with_spaces_are_handled():
     nodes = pa.table({"node id": pa.array([0, 1], type=pa.int64())})
-    rels = pa.table({
-        "source": pa.array([0], type=pa.int64()),
-        "destination": pa.array([1], type=pa.int64()),
-    })
+    rels = pa.table(
+        {
+            "source": pa.array([0], type=pa.int64()),
+            "destination": pa.array([1], type=pa.int64()),
+        }
+    )
     g = IcebugMemGraph.from_arrow_tables(nodes, rels)
     assert len(g.indices) == 1
 

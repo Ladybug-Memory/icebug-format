@@ -42,7 +42,6 @@ Starting from a `demo-db.duckdb` with `nodes_user`, `nodes_city`, `edges_follows
 
 ```bash
 uv run icebug-format \
-  --directed \
   --source-db demo-db.duckdb \
   --schema demo-db/schema.cypher
 ```
@@ -83,11 +82,11 @@ graph: IcebugMemGraph = IcebugMemGraph.from_arrow_tables(
     to_node_arrow_table=cities,    # pa.Table, first column is the primary key
 )
 
-# Directed or undirected homogeneous graph (same node type on both ends)
+# Directed graph, or homogeneous graph with reverse edges added
 graph: IcebugMemGraph = IcebugMemGraph.from_arrow_tables(
     from_node_arrow_table=users,   # pa.Table, first column is the primary key
     rel_arrow_table=follows,       # pa.Table with 'source' and 'target' columns
-    undirected=True,                 # undirected=True for undirected (to_node_arrow_table must be omitted)
+    add_reverse_edges=True,        # to_node_arrow_table must be omitted
 )
 
 # Node tables are passed through unchanged
@@ -108,16 +107,15 @@ The `rel_arrow_table` source and target columns are resolved by name in priority
 
 Any remaining columns are preserved as edge properties in `graph.indices`.
 
-Set `undirected=True` to automatically add reverse edges (undirected graph).  For undirected graphs, `to_node_arrow_table` must be omitted; the same node table is used for both sides of every edge.
+Use `--add-reverse-edges` in the CLI, or `add_reverse_edges=True` in the Python API, to emit a symmetric adjacency by adding reverse edges. For reverse-edge expansion, `to_node_arrow_table` must be omitted; the same node table is used for both sides of every edge.
 
 ## Caveats
 
 - icebug-format will always output a directed graph
-- If you want an undirected graph to be converted, pass undirected=True to the CLI or Python API, and the reverse edges will be added automatically. But do note that undirected graphs are supported for rel tables with same node type on both ends only
+- If an algorithm needs symmetric adjacency, pass `--add-reverse-edges` to the CLI or `add_reverse_edges=True` to the Python API. Reverse edges will be added automatically. Reverse-edge expansion is supported only for rel tables with the same node type on both ends.
 
 ---
 
 ## Further reading
 
 [Blog post: Graph Archiving with Apache GraphAR](https://adsharma.github.io/graph-archiving/)
-

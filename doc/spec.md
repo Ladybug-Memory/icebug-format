@@ -30,7 +30,7 @@ icebug-format \
   [--edge-table EDGE_TABLE] \
   [--schema SCHEMA_CYPHER] \
   [--storage STORAGE_PATH] \
-  [--directed] \
+  [--add-reverse-edges] \
   [--test] \
   [--limit N] \
   [--memory-limit LIMIT]
@@ -210,23 +210,25 @@ For each selected edge table `ET`:
 Only edges whose endpoints both exist in the selected node mappings are emitted,
 because the conversion uses inner-join semantics.
 
-### Directed and Undirected Modes
+### Direction and Reverse Edges
 
-With `--directed`, each non-self-loop input edge produces one output edge:
+By default, input edges are treated as directed. Each input edge produces one
+output edge:
 
 ```text
 source -> target
 ```
 
-Without `--directed`, the graph is treated as undirected. Each non-self-loop
-input edge produces two output edges:
+With `--add-reverse-edges`, each non-self-loop input edge also emits a reverse
+edge, producing symmetric adjacency for algorithms that need it. Each self-loop
+appears once:
 
 ```text
 source -> target
 target -> source
 ```
 
-Edge properties are copied onto both directions in undirected mode.
+Edge properties are copied onto both directions when reverse edges are added.
 
 ### Test Limit
 
@@ -239,8 +241,8 @@ When multiple edge tables are selected, the per-table limit is:
 floor(limit / number_of_edge_tables)
 ```
 
-The limit is applied before undirected edge duplication. In undirected mode, a
-per-table limit of `L` can therefore emit up to `2L` rows for that edge type.
+The limit is applied before reverse-edge expansion. With `--add-reverse-edges`,
+a per-table limit of `L` can therefore emit up to `2L` rows for that edge type.
 
 The implementation does not define a deterministic ordering before applying the
 limit, so callers should treat test-mode sampling as backend-dependent unless
@@ -366,15 +368,15 @@ Columns:
 ```text
 n_nodes
 n_edges
-directed
+add_reverse_edges
 ```
 
 `n_nodes` is the sum of selected node table row counts.
 
-`n_edges` is the sum of emitted rows across all generated indices tables. In
-undirected mode this includes duplicated reverse edges.
+`n_edges` is the sum of emitted rows across all generated indices tables. With
+`--add-reverse-edges`, this includes generated reverse edges.
 
-`directed` records whether `--directed` was supplied.
+`add_reverse_edges` records whether `--add-reverse-edges` was supplied.
 
 ### Parquet Directory
 
@@ -491,7 +493,7 @@ A non-DuckDB backend must provide equivalent behavior for:
 - assigning zero-based dense IDs with deterministic ordering
 - joining edge tables to source and destination mapping tables
 - filtering self-loops
-- duplicating edges for undirected mode
+- adding reverse edges for symmetric adjacency
 - preserving edge property columns and values
 - grouping emitted edges by `csr_source` to compute degrees
 - creating cumulative CSR offsets for all source node IDs from `0` to `N - 1`,
