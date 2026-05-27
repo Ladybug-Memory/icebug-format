@@ -1,12 +1,13 @@
 """Tests for the icebug-disk converter (create_csr_graph_to_duckdb)."""
 
+import sys
 import tempfile
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from icebug_format.cli import create_csr_graph_to_duckdb
+from icebug_format.cli import create_csr_graph_to_duckdb, default_csr_table_name, main
 
 _MEM = "1GB"
 
@@ -85,8 +86,12 @@ def test_directed_basic():
         create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
 
         con = duckdb.connect(out)
-        indices = con.execute("SELECT target FROM csr_graph_indices_edges ORDER BY rowid").fetchall()
-        indptr = con.execute("SELECT ptr FROM csr_graph_indptr_edges ORDER BY rowid").fetchall()
+        indices = con.execute(
+            "SELECT target FROM csr_graph_indices_edges ORDER BY rowid"
+        ).fetchall()
+        indptr = con.execute(
+            "SELECT ptr FROM csr_graph_indptr_edges ORDER BY rowid"
+        ).fetchall()
         con.close()
 
         assert [r[0] for r in indices] == [1, 2]
@@ -121,7 +126,9 @@ def test_directed_preserves_self_loops():
         create_csr_graph_to_duckdb(src, out, undirected=False, memory_limit=_MEM)
 
         con = duckdb.connect(out)
-        indices = con.execute("SELECT target FROM csr_graph_indices_edges ORDER BY target").fetchall()
+        indices = con.execute(
+            "SELECT target FROM csr_graph_indices_edges ORDER BY target"
+        ).fetchall()
         con.close()
 
         assert sorted(r[0] for r in indices) == [0, 1]
@@ -141,7 +148,9 @@ def test_undirected_adds_reverse_edges():
         create_csr_graph_to_duckdb(src, out, undirected=True, memory_limit=_MEM)
 
         con = duckdb.connect(out)
-        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
+            0
+        ]
         con.close()
 
         assert count == 2  # forward + reverse
@@ -157,7 +166,9 @@ def test_undirected_self_loop_appears_once():
         create_csr_graph_to_duckdb(src, out, undirected=True, memory_limit=_MEM)
 
         con = duckdb.connect(out)
-        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
+            0
+        ]
         con.close()
 
         # Edges: 0--0 (once) + 0--1 (forward) + 1--0 (reverse) = 3
@@ -183,7 +194,11 @@ def test_undirected_heterogeneous_edges_raise():
 
         with pytest.raises(ValueError, match="same node table"):
             create_csr_graph_to_duckdb(
-                src, out, undirected=True, schema_path=str(schema_path), memory_limit=_MEM
+                src,
+                out,
+                undirected=True,
+                schema_path=str(schema_path),
+                memory_limit=_MEM,
             )
 
 
@@ -199,10 +214,14 @@ def test_limit_rels_caps_edge_count():
         out = str(Path(tmpdir) / "out.duckdb")
         # 10 edges: 0->1, 1->2, ..., 9->10
         _make_source_db(src, [(i, i + 1) for i in range(10)])
-        create_csr_graph_to_duckdb(src, out, undirected=False, limit_rels=3, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(
+            src, out, undirected=False, limit_rels=3, memory_limit=_MEM
+        )
 
         con = duckdb.connect(out)
-        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
+            0
+        ]
         con.close()
 
         assert count <= 3
@@ -215,10 +234,14 @@ def test_limit_rels_undirected_adds_reverse_within_limit():
         out = str(Path(tmpdir) / "out.duckdb")
         # 6 distinct edges: 0-1, 1-2, 2-3, 3-4, 4-5, 5-0
         _make_source_db(src, [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)])
-        create_csr_graph_to_duckdb(src, out, undirected=True, limit_rels=2, memory_limit=_MEM)
+        create_csr_graph_to_duckdb(
+            src, out, undirected=True, limit_rels=2, memory_limit=_MEM
+        )
 
         con = duckdb.connect(out)
-        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM csr_graph_indices_edges").fetchone()[
+            0
+        ]
         con.close()
 
         # 2 forward edges → 4 total (each gets a reverse)
@@ -236,7 +259,9 @@ def test_csr_table_name_prefix():
         src = str(Path(tmpdir) / "src.duckdb")
         out = str(Path(tmpdir) / "out.duckdb")
         _make_source_db(src, [(0, 1), (1, 2)])
-        create_csr_graph_to_duckdb(src, out, undirected=False, csr_table_name="mygraph", memory_limit=_MEM)
+        create_csr_graph_to_duckdb(
+            src, out, undirected=False, csr_table_name="mygraph", memory_limit=_MEM
+        )
 
         con = duckdb.connect(out)
         tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
@@ -298,7 +323,11 @@ def test_edge_table_not_found_raises():
         _make_source_db(src, [(0, 1)])
         with pytest.raises(ValueError, match="No edge tables found"):
             create_csr_graph_to_duckdb(
-                src, out, undirected=False, edge_table="edges_nonexistent", memory_limit=_MEM
+                src,
+                out,
+                undirected=False,
+                edge_table="edges_nonexistent",
+                memory_limit=_MEM,
             )
 
 
@@ -340,7 +369,11 @@ def test_storage_path_appears_in_schema_cypher():
         _make_source_db(src, [(0, 1), (1, 2)])
 
         create_csr_graph_to_duckdb(
-            src, out, undirected=False, storage_path="./my_custom_store", memory_limit=_MEM
+            src,
+            out,
+            undirected=False,
+            storage_path="./my_custom_store",
+            memory_limit=_MEM,
         )
 
         out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
@@ -359,3 +392,49 @@ def test_storage_path_default_uses_output_stem():
         out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
         # Default storage_path is "./out" (stem of out.duckdb)
         assert "./out" in out_schema
+
+
+def test_default_csr_table_name_is_sql_safe():
+    assert default_csr_table_name("wikidata-20250625") == "wikidata_20250625"
+    assert default_csr_table_name("2025.graph") == "_2025_graph"
+    assert default_csr_table_name("---") == "csr_graph"
+
+
+def test_cli_default_csr_table_allows_dashed_source_db(tmp_path, monkeypatch):
+    source_db = tmp_path / "wikidata-20250625.db"
+    output_db = tmp_path / "wikidata-20250625_csr.duckdb"
+
+    con = duckdb.connect(str(source_db))
+    try:
+        con.execute("CREATE TABLE nodes (id BIGINT);")
+        con.execute("INSERT INTO nodes VALUES (1), (2), (3);")
+        con.execute("CREATE TABLE edges (source BIGINT, target BIGINT);")
+        con.execute("INSERT INTO edges VALUES (1, 2), (2, 3);")
+    finally:
+        con.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "icebug-format",
+            "--source-db",
+            str(source_db),
+            "--memory-limit",
+            "1GB",
+        ],
+    )
+
+    main()
+
+    con = duckdb.connect(str(output_db), read_only=True)
+    try:
+        tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
+        assert "wikidata_20250625_nodes" in tables
+        assert "wikidata_20250625_indices_edges" in tables
+        assert "wikidata_20250625_indptr_edges" in tables
+        assert con.execute(
+            "SELECT ptr FROM wikidata_20250625_indptr_edges"
+        ).fetchall() == [(0,), (1,), (2,), (2,)]
+    finally:
+        con.close()

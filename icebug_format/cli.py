@@ -138,6 +138,16 @@ def parse_memory_limit(value: str) -> str:
         return normalized
 
 
+def default_csr_table_name(source_stem: str) -> str:
+    """Return a SQL-safe default CSR table prefix from a source DB stem."""
+    table_name = re.sub(r"\W+", "_", source_stem).strip("_")
+    if not table_name:
+        table_name = "csr_graph"
+    if table_name[0].isdigit():
+        table_name = f"_{table_name}"
+    return table_name
+
+
 def set_memory_limit(con, memory_limit: str) -> None:
     """Apply DuckDB's memory limit setting."""
     con.execute("SET memory_limit = ?", [memory_limit])
@@ -766,7 +776,7 @@ def main():
     if args.output_db is None:
         args.output_db = str(Path(args.source_db).parent / f"{source_stem}_csr.duckdb")
     if args.csr_table is None:
-        args.csr_table = source_stem
+        args.csr_table = default_csr_table_name(source_stem)
 
     if args.graphar:
         print("=== GraphAr to CSR Format Converter ===\n")
