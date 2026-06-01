@@ -194,7 +194,6 @@ def generate_schema_cypher(
     parquet_dir: Path,
     edge_relationships: dict,
     node_type_to_table: dict,
-    storage_path: str,
 ) -> str:
     """
     Generate schema.cypher content for ladybugdb.
@@ -207,7 +206,6 @@ def generate_schema_cypher(
         parquet_dir: Path to the parquet output directory (for storage path)
         edge_relationships: Dict of edge relationships from schema
         node_type_to_table: Mapping of node types to table names
-        storage_path: Storage path string for schema.cypher
 
     Returns:
         String containing the schema.cypher content
@@ -252,7 +250,7 @@ def generate_schema_cypher(
             display_name = node_display_names[node_table]
             lines.append(
                 f"CREATE NODE TABLE {display_name}({cols_str}, PRIMARY KEY({pk_col})) "
-                f"WITH (storage = '{storage_path}', format = 'icebug-disk');"
+                f"WITH (storage = '', format = 'icebug-disk');"
             )
         except Exception as e:
             print(
@@ -296,7 +294,7 @@ def generate_schema_cypher(
             props_str = ", ".join(col_defs)
             lines.append(
                 f"CREATE REL TABLE {rel_name}(FROM {src_table} TO {dst_table}"
-                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}', format = 'icebug-disk');"
+                f"{', ' + props_str if props_str else ''}) WITH (storage = '', format = 'icebug-disk');"
             )
         except Exception as e:
             print(f"Warning: Could not generate schema for rel table {rel_name}: {e}")
@@ -379,8 +377,7 @@ def export_to_parquet_and_cypher(
         edge_tables,
         parquet_dir,
         edge_relationships,
-        node_type_to_table,
-        storage_path,
+        node_type_to_table
     )
     schema_file = parquet_dir / "schema.cypher"
     schema_file.write_text(schema_cypher)
