@@ -469,9 +469,6 @@ def convert_graphar_to_graph_std(
 
     print(f"Parquet output directory: {parquet_dir}")
 
-    # Compute storage path (points to the parquet directory)
-    storage_path = f"./{parquet_dir.name}"
-
     # Export node tables: nodes_<vertex_type>.parquet
     for vertex_type, src_table in vertex_type_to_table.items():
         csr_node_table = f"{csr_table_name}_{src_table}"
@@ -514,7 +511,7 @@ def convert_graphar_to_graph_std(
             cols_str = ", ".join(col_defs)
             schema_lines.append(
                 f"CREATE NODE TABLE {vertex_type}({cols_str}, PRIMARY KEY({pk_col})) "
-                f"WITH (storage = '{storage_path}', format = 'icebug-disk');"
+                f"WITH (storage = '', format = 'icebug-disk');"
             )
         except Exception as e:
             print(
@@ -542,7 +539,7 @@ def convert_graphar_to_graph_std(
             props_str = ", ".join(col_defs)
             schema_lines.append(
                 f"CREATE REL TABLE {edge_type}(FROM {src_type} TO {dst_type}"
-                f"{', ' + props_str if props_str else ''}) WITH (storage = '{storage_path}', format = 'icebug-disk');"
+                f"{', ' + props_str if props_str else ''}) WITH (storage = '', format = 'icebug-disk');"
             )
         except Exception as e:
             print(f"Warning: Could not generate schema for rel table {edge_type}: {e}")
