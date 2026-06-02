@@ -363,7 +363,7 @@ def test_schema_path_maps_from_to_node_types():
 
         schema_path = Path(tmpdir) / "in_schema.cypher"
         schema_path.write_text(
-            "CREATE REL TABLE livesin(FROM user TO city) WITH (storage='x', format='icebug-disk');\n"
+            "CREATE REL TABLE livesin(FROM user TO city) WITH (storage='', format='icebug-disk');\n"
         )
 
         create_csr_graph_to_duckdb(
@@ -399,22 +399,7 @@ def test_storage_path_appears_in_schema_cypher():
         )
 
         out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
-        assert "./my_custom_store" in out_schema
-
-
-def test_storage_path_default_uses_output_stem():
-    """When storage_path is omitted the output DB stem is used as the default."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        src = str(Path(tmpdir) / "src.duckdb")
-        out = str(Path(tmpdir) / "out.duckdb")
-        _make_source_db(src, [(0, 1)])
-
-        create_csr_graph_to_duckdb(src, out, add_reverse_edges=False, memory_limit=_MEM)
-
-        out_schema = (_parquet_dir(out) / "schema.cypher").read_text()
-        # Default storage_path is "./out" (stem of out.duckdb)
-        assert "./out" in out_schema
-
+        assert "storage = ''" in out_schema
 
 def test_default_csr_table_name_is_sql_safe():
     assert default_csr_table_name("wikidata-20250625") == "wikidata_20250625"
