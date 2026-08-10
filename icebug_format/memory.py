@@ -8,8 +8,9 @@ parquet files, graph data is stored as PyArrow tables in a CSR
 
 from dataclasses import dataclass
 
-import duckdb
 import pyarrow as pa
+
+from icebug_format._duckdb import require_duckdb as _require_duckdb
 
 _SOURCE_ALIASES = ("source", "src", "from")
 _TARGET_ALIASES = ("target", "destination", "dest", "to")
@@ -169,6 +170,7 @@ class IcebugMemGraph:
             (", " + ", ".join(q(c) for c in edge_cols)) if edge_cols else ""
         )
 
+        duckdb = _require_duckdb("IcebugMemGraph.from_arrow_tables()")
         con = duckdb.connect()
         try:
             con.register("from_nodes", from_node_arrow_table)

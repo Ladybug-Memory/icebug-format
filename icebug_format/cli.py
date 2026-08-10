@@ -33,7 +33,7 @@ import os
 import re
 from pathlib import Path
 
-import duckdb
+from icebug_format._duckdb import require_duckdb as _require_duckdb
 
 ICEBUG_DISK_VERSION = "v1"
 
@@ -423,6 +423,7 @@ def create_csr_graph_to_duckdb(
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
     # Connect to a fresh DuckDB database for output
+    duckdb = _require_duckdb("the 'convert' feature (CSR graph conversion)")
     con = duckdb.connect(output_db_path)
     set_memory_limit(con, memory_limit)
 

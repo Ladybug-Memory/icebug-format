@@ -5,11 +5,16 @@ description = "Convert graph data from relational formats to icebug format."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "duckdb>=1.3.2",
     "pyarrow>=21.0.0",
 ]
 
 [project.optional-dependencies]
+convert = [
+    "icebug-format[convert-duckdb]",
+]
+convert-duckdb = [
+    "duckdb>=1.3.2",
+]
 graphar = [
     "graphar",
 ]
