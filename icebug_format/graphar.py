@@ -29,7 +29,7 @@ from icebug_format.cli import (
 )
 
 def _require_grapphar(context: str = "GraphAr conversion") -> "module":
-    """Lazily import ansd return the ``graphar`` module."""
+    """Lazily import and return the ``graphar`` module."""
     try:
         import graphar
     except ImportError as exc:
