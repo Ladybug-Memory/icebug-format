@@ -17,6 +17,7 @@ convert-duckdb = [
 ]
 graphar = [
     "graphar",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]

@@ -18,6 +18,7 @@ Usage Examples:
 """
 
 import argparse
+import yaml
 from pathlib import Path
 
 import duckdb
@@ -28,6 +29,55 @@ from icebug_format.cli import (
     set_memory_limit,
 )
 
+class YamlVertexInfo:
+    def __init__(self, data):
+        self.data = data
+    def get_type(self): return self.data.get('type')
+    def get_prefix(self): return self.data.get('prefix')
+
+class YamlEdgeInfo:
+    def __init__(self, data):
+        self.data = data
+    def get_edge_type(self): return self.data.get('edge_type', self.data.get('type'))
+    def get_src_type(self): return self.data.get('src_type')
+    def get_dst_type(self): return self.data.get('dst_type')
+    def get_prefix(self): return self.data.get('prefix')
+
+class YamlGraphInfo:
+    def __init__(self, yaml_path: str):
+        self.base_path = Path(yaml_path).parent
+        with open(yaml_path, 'r') as f:
+            self.data = yaml.safe_load(f)
+
+        self.vertices = []
+        for v_file in self.data.get('vertices', []):
+            with open(self.base_path / v_file, 'r') as f:
+                self.vertices.append(YamlVertexInfo(yaml.safe_load(f)))
+
+        self.edges = []
+        for e_file in self.data.get('edges', []):
+            with open(self.base_path / e_file, 'r') as f:
+                self.edges.append(YamlEdgeInfo(yaml.safe_load(f)))
+
+    def vertex_info_num(self): return len(self.vertices)
+    def get_vertex_info_by_index(self, i): return self.vertices[i]
+    def edge_info_num(self): return len(self.edges)
+    def get_edge_info_by_index(self, i): return self.edges[i]
+
+    @classmethod
+    def load(cls, yaml_path):
+        return cls(yaml_path)
+
+def _require_graphar(context: str = "GraphAr conversion") -> "module":
+    """Lazily import and return the ``graphar`` module."""
+    try:
+        import graphar
+    except ImportError as exc:
+        raise ImportError(
+            f"graphar is required by {context} but is not installed or failed to load."
+            "Please ensure you have graphar installed(e.g., pip install graphar)."
+        ) from exc
+    return graphar
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
     """Convert DuckDB column type to Cypher/Kuzu type."""
@@ -175,7 +225,6 @@ def convert_graphar_to_graph_std(
     """
     print("\n=== Converting GraphAr to Graph-Std Format ===")
 
-    import graphar
 
     # Load graph info
     # Find the .graph.yml file in the directory
@@ -184,7 +233,13 @@ def convert_graphar_to_graph_std(
     if not yaml_files:
         raise ValueError(f"No .graph.yml file found in {graphar_dir}")
     yaml_path = yaml_files[0]
-    graph_info = graphar.GraphInfo.load(str(yaml_path.absolute()))
+
+    try:
+        graphar = _require_graphar()
+        graph_info = graphar.GraphInfo.load(str(yaml_path.absolute()))
+    except ImportError:
+        graph_info = YamlGraphInfo.load(str(yaml_path.absolute()))
+
 
     graph_path = graphar_path
 
