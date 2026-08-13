@@ -59,14 +59,14 @@ class YamlGraphInfo:
             with open(self.base_path / e_file, 'r') as f:
                 self.edges.append(YamlEdgeInfo(yaml.safe_load(f)))
 
-        def vertex_info_num(self): return len(self.vertices)
-        def get_vertex_info_by_index(self, i): return self.vertices[i]
-        def edge_info_num(self): return len(self.edges)
-        def get_edge_info_by_index(self, i): return self.edges[i]
+    def vertex_info_num(self): return len(self.vertices)
+    def get_vertex_info_by_index(self, i): return self.vertices[i]
+    def edge_info_num(self): return len(self.edges)
+    def get_edge_info_by_index(self, i): return self.edges[i]
 
-        @classmethod
-        def load(cls, yaml_path):
-            return cls(yaml_path)
+    @classmethod
+    def load(cls, yaml_path):
+        return cls(yaml_path)
 
 def _require_graphar(context: str = "GraphAr conversion") -> "module":
     """Lazily import and return the ``graphar`` module."""
@@ -225,11 +225,6 @@ def convert_graphar_to_graph_std(
     """
     print("\n=== Converting GraphAr to Graph-Std Format ===")
 
-    try:
-        graphar = _require_graphar()
-        graph_info = graphar.GraphInfo.load(str(yaml_path.absolute()))
-    except ImportError:
-        graph_info = YamlGraphInfo.load(str(yaml_path.absolute()))
 
     # Load graph info
     # Find the .graph.yml file in the directory
@@ -239,7 +234,11 @@ def convert_graphar_to_graph_std(
         raise ValueError(f"No .graph.yml file found in {graphar_dir}")
     yaml_path = yaml_files[0]
 
-    # graph_info = graphar.GraphInfo.load(str(yaml_path.absolute()))
+    try:
+        graphar = _require_graphar()
+        graph_info = graphar.GraphInfo.load(str(yaml_path.absolute()))
+    except ImportError:
+        graph_info = YamlGraphInfo.load(str(yaml_path.absolute()))
 
 
     graph_path = graphar_path
