@@ -33,8 +33,8 @@ def _write_graph(dir_: Path, name: str, vertex_ids, edges, prop=None):
 
 
 def _read_csr(out_dir: Path, name: str):
-    indices = pq.read_table(out_dir / f"indices_{name}.parquet")
-    indptr = pq.read_table(out_dir / f"indptr_{name}.parquet")
+    indices = pq.read_table(out_dir / f"indices_{name}_rel.parquet")
+    indptr = pq.read_table(out_dir / f"indptr_{name}_rel.parquet")
     nodes = pq.read_table(out_dir / f"nodes_{name}.parquet")
     return nodes, indices, indptr
 
@@ -178,7 +178,11 @@ def test_icebug_disk_metadata_written(backend):
         )
         out_dir = Path(res[0]["output_dir"])
 
-        for f in ("nodes_g.parquet", "indices_g.parquet", "indptr_g.parquet"):
+        for f in (
+            "nodes_g.parquet",
+            "indices_g_rel.parquet",
+            "indptr_g_rel.parquet",
+        ):
             meta = pq.ParquetFile(out_dir / f).metadata.metadata or {}
             assert meta.get(b"icebug_disk_version") == b"v1"
 
@@ -361,10 +365,10 @@ def test_backends_agree(backend):
         )
         convert_parquet_dir_to_csr(src, output_dir=Path(tmp) / "other", backend=backend)
 
-        base = pq.read_table(Path(tmp) / "base" / "indices_g.parquet")
-        base_ptr = pq.read_table(Path(tmp) / "base" / "indptr_g.parquet")
-        other = pq.read_table(Path(tmp) / "other" / "indices_g.parquet")
-        other_ptr = pq.read_table(Path(tmp) / "other" / "indptr_g.parquet")
+        base = pq.read_table(Path(tmp) / "base" / "indices_g_rel.parquet")
+        base_ptr = pq.read_table(Path(tmp) / "base" / "indptr_g_rel.parquet")
+        other = pq.read_table(Path(tmp) / "other" / "indices_g_rel.parquet")
+        other_ptr = pq.read_table(Path(tmp) / "other" / "indptr_g_rel.parquet")
 
         assert other.equals(base)
         assert other_ptr.equals(base_ptr)
