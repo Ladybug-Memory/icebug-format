@@ -22,13 +22,15 @@ backend           characteristics
 ``duckdb``        DuckDB SQL engine; external sort bounded by ``memory_limit``
                   => lower RSS, moderate runtime.  Requires ``convert`` extra.
 ``datafusion``    Apache DataFusion SQL engine; streaming execution with
-                  ``execute_stream()`` => lowest RSS for large graphs.
+                  ``execute_stream()`` and a fair spill pool sized by
+                  ``memory_limit`` => sort spills to disk, bounded RSS.
                   Requires ``convert-datafusion`` extra.
 ================  ========================================================
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -44,6 +46,82 @@ _SOURCE_ALIASES = ("source", "src", "from")
 _TARGET_ALIASES = ("target", "destination", "dest", "to")
 
 BACKENDS = ("auto", "pyarrow", "duckdb", "datafusion")
+
+
+# ---------------------------------------------------------------------------
+# Memory limit parsing
+# ---------------------------------------------------------------------------
+
+_SIZE_UNITS = {
+    "B": 1,
+    "KB": 1 << 10,
+    "KIB": 1 << 10,
+    "MB": 1 << 20,
+    "MIB": 1 << 20,
+    "GB": 1 << 30,
+    "GIB": 1 << 30,
+    "TB": 1 << 40,
+    "TIB": 1 << 40,
+}
+_SIZE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*" r"(B|K(?:I)?B|M(?:I)?B|G(?:I)?B|T(?:I)?B)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def total_ram_bytes() -> int | None:
+    """Return total physical RAM in bytes, if detectable."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+    if pages <= 0 or page_size <= 0:
+        return None
+    return pages * page_size
+
+
+def parse_size_to_bytes(value: str | None) -> int | None:
+    """
+    Convert a ``memory_limit`` value to bytes.
+
+    Accepted forms (matching the CLI's documented contract):
+
+    - DuckDB-style size strings: ``"32GB"``, ``"1500MB"``, ``"1.5GB"``
+      (case-insensitive, ``i`` variants like ``"2GiB"`` accepted)
+    - percentages of physical RAM: ``"80%"``
+    - a bare number, interpreted as gigabytes: ``"32"``
+
+    Returns ``None`` for ``None``/empty input or a non-positive result,
+    meaning "no limit".  Raises ``ValueError`` for unparseable input.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.endswith("%"):
+        ram = total_ram_bytes()
+        if ram is None:
+            return None
+        try:
+            fraction = float(text[:-1]) / 100.0
+        except ValueError:
+            raise ValueError(f"Invalid memory limit {value!r}") from None
+        result = int(ram * fraction)
+        return result if result > 0 else None
+
+    match = _SIZE_RE.match(text)
+    if match is None:
+        raise ValueError(
+            f"Invalid memory limit {value!r}; expected a size string like "
+            f"'32GB', a percentage like '80%', or a GB number"
+        )
+    amount = float(match.group(1))
+    unit = (match.group(2) or "GB").upper()  # bare number => GB
+    result = int(amount * _SIZE_UNITS[unit])
+    return result if result > 0 else None
 
 
 # ---------------------------------------------------------------------------
