@@ -327,3 +327,137 @@ def test_input_sorted_true_agrees_with_default_on_sorted_input():
     assert g_sorted.indices.equals(g_default.indices)
     assert g_sorted.indptr.equals(g_default.indptr)
     assert g_sorted.src.equals(g_default.src)
+
+
+# ---------------------------------------------------------------------------
+# backend / memory_limit
+# ---------------------------------------------------------------------------
+
+BACKENDS = ["pyarrow", "datafusion"]
+
+
+def _assert_same_csr(g, ref):
+    assert g.src["id"].to_pylist() == ref.src["id"].to_pylist()
+    assert g.dest["id"].to_pylist() == ref.dest["id"].to_pylist()
+    assert g.indices["target"].to_pylist() == ref.indices["target"].to_pylist()
+    assert g.indptr["ptr"].to_pylist() == ref.indptr["ptr"].to_pylist()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("add_reverse_edges", [False, True])
+def test_backends_agree(backend, add_reverse_edges):
+    """DataFusion and pyarrow produce identical CSR output."""
+    nodes = pa.table({"id": pa.array([30, 10, 20, 40], type=pa.int64())})
+    rels = _rels([20, 10, 10, 99], [30, 40, 20, 30])  # 99 not in nodes: dropped
+
+    g = IcebugMemGraph.from_arrow_tables(
+        nodes, rels, backend=backend, add_reverse_edges=add_reverse_edges
+    )
+    ref = IcebugMemGraph.from_arrow_tables(
+        nodes, rels, add_reverse_edges=add_reverse_edges
+    )
+    _assert_same_csr(g, ref)
+
+
+def test_memory_limit_switches_to_datafusion_with_warning():
+    """memory_limit on the default backend warns and routes to DataFusion."""
+    nodes = _nodes(0, 1, 2)
+    rels = _rels([0, 1], [1, 2])
+
+    with pytest.warns(UserWarning, match="switching to the datafusion backend"):
+        g = IcebugMemGraph.from_arrow_tables(nodes, rels, memory_limit="128MB")
+
+    ref = IcebugMemGraph.from_arrow_tables(nodes, rels)
+    _assert_same_csr(g, ref)
+
+
+def test_backend_datafusion_with_memory_limit_matches_pyarrow():
+    nodes = _nodes(30, 10, 20, 40)
+    rels = _rels([20, 10], [30, 40])
+
+    g = IcebugMemGraph.from_arrow_tables(
+        nodes, rels, backend="datafusion", memory_limit="128MB"
+    )
+    ref = IcebugMemGraph.from_arrow_tables(nodes, rels)
+    _assert_same_csr(g, ref)
+
+
+def test_backend_datafusion_edge_properties():
+    nodes = _nodes(0, 1, 2)
+    rels = pa.table(
+        {
+            "source": pa.array([0, 1], type=pa.int64()),
+            "destination": pa.array([1, 2], type=pa.int64()),
+            "weight": pa.array([0.5, 1.5], type=pa.float32()),
+        }
+    )
+
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, backend="datafusion")
+
+    assert g.indices["weight"].to_pylist() == pytest.approx([0.5, 1.5])
+    assert g.indptr.schema.names == ["ptr"]
+
+
+def test_backend_datafusion_empty_edges():
+    nodes = _nodes(0, 1, 2)
+    rels = _rels([], [])
+
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, backend="datafusion")
+
+    assert len(g.indices) == 0
+    assert g.indices.schema.field("target").type == pa.uint64()
+    assert g.indptr["ptr"].to_pylist() == [0, 0, 0, 0]
+
+
+def test_backend_datafusion_heterogeneous_nodes():
+    src = pa.table({"id": pa.array([20, 10], type=pa.int64())})
+    dst = pa.table({"id": pa.array([30, 40], type=pa.int64())})
+    rels = _rels([20], [40])
+
+    g = IcebugMemGraph.from_arrow_tables(
+        src, rels, to_node_arrow_table=dst, backend="datafusion"
+    )
+
+    assert g.src["id"].to_pylist() == [10, 20]
+    assert g.dest["id"].to_pylist() == [30, 40]
+    assert g.indices["target"].to_pylist() == [1]
+
+
+def test_backend_datafusion_ignores_input_sorted():
+    """The datafusion backend always sorts by primary key."""
+    nodes = pa.table({"id": pa.array([30, 10, 20], type=pa.int64())})
+    rels = _rels([20], [30])
+
+    g = IcebugMemGraph.from_arrow_tables(
+        nodes, rels, backend="datafusion", input_sorted=True
+    )
+    ref = IcebugMemGraph.from_arrow_tables(nodes, rels)
+
+    assert g.src["id"].to_pylist() == [10, 20, 30]
+    _assert_same_csr(g, ref)
+
+
+def test_invalid_backend_raises():
+    nodes = _nodes(0, 1)
+    rels = _rels([0], [1])
+    with pytest.raises(ValueError, match="Unknown backend"):
+        IcebugMemGraph.from_arrow_tables(nodes, rels, backend="duckdb")
+
+
+def test_backend_datafusion_validations_shared():
+    """DataFusion path enforces the same input validation as pyarrow."""
+    nodes = _nodes(0, 1)
+    with pytest.raises(ValueError, match="at least 2 columns"):
+        IcebugMemGraph.from_arrow_tables(
+            nodes,
+            pa.table({"source": pa.array([0], type=pa.int64())}),
+            backend="datafusion",
+        )
+    with pytest.raises(ValueError, match="to_node_arrow_table must not be provided"):
+        IcebugMemGraph.from_arrow_tables(
+            nodes,
+            _rels([0], [1]),
+            to_node_arrow_table=nodes,
+            add_reverse_edges=True,
+            backend="datafusion",
+        )
