@@ -283,3 +283,47 @@ def test_empty_edges_produces_zero_indptr():
 
     assert len(g.indices) == 0
     assert g.indptr["ptr"].to_pylist() == [0, 0, 0, 0]
+
+
+# ---------------------------------------------------------------------------
+# input_sorted
+# ---------------------------------------------------------------------------
+
+
+def test_input_sorted_default_sorts_unsorted_nodes():
+    """By default, node tables are sorted by primary key before CSR mapping."""
+    nodes = pa.table({"id": pa.array([30, 10, 20, 40], type=pa.int64())})
+    rels = _rels([20, 10, 10], [30, 40, 20])
+
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels)
+
+    # CSR ids follow pk order: 10=0, 20=1, 30=2, 40=3
+    assert g.src["id"].to_pylist() == [10, 20, 30, 40]
+    assert g.indices["target"].to_pylist() == [1, 3, 2]  # (0,1),(0,3),(1,2)
+    assert g.indptr["ptr"].to_pylist() == [0, 2, 3, 3, 3]
+
+
+def test_input_sorted_true_uses_input_row_order():
+    """input_sorted=True assigns CSR ids by row position (legacy behaviour)."""
+    nodes = pa.table({"id": pa.array([30, 10, 20, 40], type=pa.int64())})
+    rels = _rels([20, 10, 10], [30, 40, 20])
+
+    g = IcebugMemGraph.from_arrow_tables(nodes, rels, input_sorted=True)
+
+    # CSR ids follow input row order: 30=0, 10=1, 20=2, 40=3
+    assert g.src.equals(nodes)  # passed through unchanged
+    assert g.indices["target"].to_pylist() == [2, 3, 0]  # (1,2),(1,3),(2,0)
+    assert g.indptr["ptr"].to_pylist() == [0, 0, 2, 3, 3]
+
+
+def test_input_sorted_true_agrees_with_default_on_sorted_input():
+    """For already-sorted input, both modes produce identical CSR output."""
+    nodes = _nodes(0, 1, 2, 3)
+    rels = _rels([0, 1, 2], [1, 2, 0])
+
+    g_sorted = IcebugMemGraph.from_arrow_tables(nodes, rels, input_sorted=True)
+    g_default = IcebugMemGraph.from_arrow_tables(nodes, rels)
+
+    assert g_sorted.indices.equals(g_default.indices)
+    assert g_sorted.indptr.equals(g_default.indptr)
+    assert g_sorted.src.equals(g_default.src)
