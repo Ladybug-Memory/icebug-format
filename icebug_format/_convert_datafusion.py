@@ -40,6 +40,15 @@ from icebug_format.convert_parquet import (
 
 _COMPRESSION = "zstd"
 
+# Row groups are flushed on every ``ParquetWriter.write_table``/``write_batch``
+# call (the default row group size is ``min(rows, 1 MiB)`` *per call*, not
+# accumulated across calls), so DataFusion's 8192-row stream batches would each
+# become their own tiny row group, fragmenting zstd's compression window and
+# row-group metadata.  Buffer batches to this many rows and write each chunk as
+# a single row group.  122880 matches the row-group size of the LDBC input
+# parquet files (DuckDB's writer).
+_ROWS_PER_ROW_GROUP = 122880
+
 # Arrow tables are registered with the engine in chunks of at most this many
 # rows.  A single-chunk table would otherwise arrive as one huge record batch
 # and force operators (e.g. SortExec feeding the ROW_NUMBER window) to reserve
@@ -95,7 +104,12 @@ def _build_context(datafusion, memory_limit: str | None):
     return datafusion.SessionContext(config=config, runtime=runtime)
 
 
-def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
+def _stream_to_parquet(
+    df,
+    path: Path,
+    target_to_uint64: bool = False,
+    plain_columns: list[str] | None = None,
+) -> None:
     """
     Stream a DataFusion DataFrame into a Parquet file with icebug metadata.
 
@@ -103,8 +117,31 @@ def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
     rather than materialising the whole result, which is the point of the
     DataFusion backend.  Falls back to ``to_arrow_table()`` only for empty
     results (where there is nothing to stream).
+
+    ``plain_columns`` names columns whose values are effectively unique or
+    random per row group (CSR ``target`` neighbour ids, node primary keys).
+    pyarrow's default dictionary encoding writes a dictionary page per row
+    group that can never pay off for such columns (a dictionary of N distinct
+    values costs roughly 2x the plain data), inflating the file; those columns
+    are written with PLAIN encoding while any other (low-cardinality property)
+    columns keep dictionary encoding.
     """
     writer = None
+    plain = set(plain_columns or ())
+    buf: list[pa.RecordBatch] = []
+    buf_rows = 0
+
+    def _flush() -> None:
+        """Write the buffered batches as one row group."""
+        nonlocal buf, buf_rows
+        if not buf:
+            return
+        # row_group_size=None -> min(rows, 1 MiB) per call, i.e. exactly one
+        # row group of _ROWS_PER_ROW_GROUP rows (the tail chunk may be smaller).
+        writer.write_table(pa.Table.from_batches(buf))
+        buf = []
+        buf_rows = 0
+
     for batch in df.execute_stream():
         rb = batch.to_pyarrow()
         if writer is None:
@@ -113,13 +150,21 @@ def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
                 i = schema.get_field_index("target")
                 schema = schema.set(i, pa.field(schema.field(i).name, pa.uint64()))
             schema = schema.with_metadata({"icebug_disk_version": ICEBUG_DISK_VERSION})
-            writer = pq.ParquetWriter(path, schema, compression=_COMPRESSION)
+            # Enable dictionary encoding only where it can pay off; a listed
+            # use_dictionary of column names disables it for all others.
+            dict_cols = [c for c in schema.names if c not in plain]
+            writer = pq.ParquetWriter(
+                path, schema, compression=_COMPRESSION, use_dictionary=dict_cols
+            )
         if target_to_uint64 and "target" in rb.schema.names:
             i = rb.schema.get_field_index("target")
             rb = rb.set_column(
                 i, rb.schema.field(i).name, rb.column(i).cast(pa.uint64())
             )
-        writer.write_batch(rb)
+        buf.append(rb)
+        buf_rows += rb.num_rows
+        if buf_rows >= _ROWS_PER_ROW_GROUP:
+            _flush()
     if writer is None:
         table = df.to_arrow_table()
         if target_to_uint64 and "target" in table.schema.names:
@@ -131,6 +176,7 @@ def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
             )
         _write_icebug_parquet(table, path, compression=_COMPRESSION)
         return
+    _flush()
     writer.close()
 
 
@@ -346,6 +392,7 @@ def convert_graph(
         ctx.sql(idx_sql),
         out_dir / f"indices_{csr_rel_name(name)}.parquet",
         target_to_uint64=True,
+        plain_columns=["target"],
     )
 
     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.
@@ -358,6 +405,7 @@ def convert_graph(
     _stream_to_parquet(
         ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(pk)}"),
         out_dir / f"nodes_{name}.parquet",
+        plain_columns=[pk],
     )
     _write_icebug_parquet(
         indptr,
