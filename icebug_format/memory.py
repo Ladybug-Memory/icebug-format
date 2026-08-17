@@ -7,9 +7,10 @@ parquet files, graph data is stored as PyArrow tables in a CSR
 
 The conversion is performed by the pure-PyArrow pipeline in
 :mod:`icebug_format._convert_pyarrow` (the same engine behind the
-``pyarrow`` Parquet-pair backend); DuckDB is not required.  When a memory
-limit is requested (or ``backend="datafusion"``), the DataFusion SQL engine
-is used instead so sorts can spill to disk.
+``pyarrow`` Parquet-pair backend); DuckDB is not required.  The ``"duckdb"``
+and ``"datafusion"`` backends run the same plan inside a SQL engine so a
+``memory_limit`` can spill sorts to disk; requesting a memory limit with the
+default backend switches to datafusion.
 """
 
 import warnings
@@ -93,8 +94,9 @@ class IcebugMemGraph:
                                    backend, which always sorts by primary key.
                                    Defaults to ``False``.
             backend:               Conversion engine: ``"pyarrow"`` (default;
-                                   pure in-memory pipeline) or ``"datafusion"``
-                                   (SQL engine, requires the
+                                   pure in-memory pipeline), ``"duckdb"``
+                                   (requires the ``convert`` extra) or
+                                   ``"datafusion"`` (requires the
                                    ``convert-datafusion`` extra).  When
                                    *memory_limit* is set and *backend* is left
                                    at the default, the backend automatically
@@ -104,7 +106,8 @@ class IcebugMemGraph:
                                    for sorting (size string like ``"4GB"``,
                                    percent of RAM like ``"50%"``, or a GB
                                    number); sorts spill to disk.  Only honored
-                                   by the ``"datafusion"`` backend.
+                                   by the ``"duckdb"`` and ``"datafusion"``
+                                   backends.
 
         Returns:
             IcebugMemGraph where *src* and *dest* are the node tables in CSR
@@ -115,11 +118,13 @@ class IcebugMemGraph:
             ValueError: If *rel_arrow_table* has fewer than 2 columns.
             ValueError: If ``add_reverse_edges=True`` and *to_node_arrow_table*
                         is provided.
-            ValueError: If *backend* is not ``"pyarrow"`` or ``"datafusion"``.
+            ValueError: If *backend* is not ``"pyarrow"``, ``"duckdb"`` or
+                        ``"datafusion"``.
         """
-        if backend not in ("pyarrow", "datafusion"):
+        if backend not in ("pyarrow", "duckdb", "datafusion"):
             raise ValueError(
-                f"Unknown backend {backend!r}; expected 'pyarrow' or 'datafusion'"
+                f"Unknown backend {backend!r}; expected 'pyarrow', 'duckdb' or "
+                f"'datafusion'"
             )
         if backend == "pyarrow" and memory_limit:
             warnings.warn(
@@ -135,6 +140,18 @@ class IcebugMemGraph:
             )
 
             src, dest, indices, indptr = _df_build_csr(
+                from_node_arrow_table,
+                rel_arrow_table,
+                to_node_table=to_node_arrow_table,
+                add_reverse_edges=add_reverse_edges,
+                memory_limit=memory_limit,
+            )
+        elif backend == "duckdb":
+            from icebug_format._convert_duckdb import (
+                build_csr_from_arrow_tables as _dd_build_csr,
+            )
+
+            src, dest, indices, indptr = _dd_build_csr(
                 from_node_arrow_table,
                 rel_arrow_table,
                 to_node_table=to_node_arrow_table,
