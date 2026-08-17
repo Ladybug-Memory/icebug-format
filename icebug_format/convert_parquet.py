@@ -284,7 +284,7 @@ def _generate_schema_cypher(graph_name: str, output_dir: Path, storage: str) -> 
     ]
     props_str = (", " + ", ".join(props)) if props else ""
     lines.append(
-        f"CREATE REL TABLE {graph_name}(FROM {graph_name} TO {graph_name}{props_str}) "
+        f"CREATE REL TABLE {graph_name}_rel(FROM {graph_name} TO {graph_name}{props_str}) "
         f"WITH (storage = '{storage}', format = 'icebug-disk');"
     )
     return "\n".join(lines) + "\n"
@@ -354,7 +354,7 @@ def _select_backend(backend: str, memory_limit: str | None = None) -> Callable:
 
 def convert_parquet_dir_to_csr(
     source_dir: str | Path,
-    output_db: str | Path | None = None,
+    output_dir: str | Path | None = None,
     graph_name: str | None = None,
     backend: str = "auto",
     add_reverse_edges: bool = False,
@@ -367,9 +367,9 @@ def convert_parquet_dir_to_csr(
     Args:
         source_dir: Directory containing ``<name>-v.parquet``/``<name>-e.parquet``
             pairs (and/or ``vertex.parquet``/``edge.parquet``).
-        output_db: Output database path used only as a naming convention; the
-            Parquet files are written to a sibling directory named after its
-            stem.  Defaults to ``<parent>/<source_dir.name>_csr.duckdb``.
+        output_dir: Output directory for the icebug-disk Parquet files.  When
+            multiple graphs are discovered each one is written to a subdirectory
+            ``<output_dir>/<graph_name>``.  Defaults to ``<source_dir>-csr``.
         graph_name: Optional filter; when omitted, every discovered graph is
             converted.
         backend: One of ``auto``, ``pyarrow``, ``duckdb``, ``datafusion``.
@@ -398,18 +398,17 @@ def convert_parquet_dir_to_csr(
                 f"{', '.join(g['name'] for g in graphs)}"
             )
 
-    output_db = (
-        Path(output_db)
-        if output_db
-        else Path(source_dir).parent / f"{Path(source_dir).name}_csr.duckdb"
+    output_dir = (
+        Path(output_dir)
+        if output_dir
+        else Path(source_dir).parent / f"{Path(source_dir).name}-csr"
     )
-    output_base = Path(output_db).parent / Path(output_db).stem
     if len(graphs) == 1:
-        out_dirs = [output_base]
+        out_dirs = [output_dir]
     else:
-        out_dirs = [output_base / g["name"] for g in graphs]
+        out_dirs = [output_dir / g["name"] for g in graphs]
 
-    storage_path = storage if storage is not None else f"./{Path(output_db).stem}"
+    storage_path = storage if storage is not None else f"./{output_dir.name}"
 
     convert = _select_backend(backend, memory_limit)
     results: list[dict] = []

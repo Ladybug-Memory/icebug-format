@@ -51,7 +51,7 @@ def test_directed_sparse_ids(backend):
         )
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         assert [r["name"] for r in res] == ["g"]
         out_dir = Path(res[0]["output_dir"])
@@ -73,7 +73,7 @@ def test_dense_contiguous_ids(backend):
         _write_graph(src, "g", [2, 0, 1], [(0, 1), (2, 0), (1, 1)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
         _, indices, indptr = _read_csr(out_dir, "g")
@@ -90,7 +90,7 @@ def test_reverse_edges(backend):
 
         res = convert_parquet_dir_to_csr(
             src,
-            output_db=Path(tmp) / "out.duckdb",
+            output_dir=Path(tmp) / "out",
             backend=backend,
             add_reverse_edges=True,
         )
@@ -110,7 +110,7 @@ def test_self_loops_appear_once_with_reverse_edges(backend):
 
         res = convert_parquet_dir_to_csr(
             src,
-            output_db=Path(tmp) / "out.duckdb",
+            output_dir=Path(tmp) / "out",
             backend=backend,
             add_reverse_edges=True,
         )
@@ -127,7 +127,7 @@ def test_self_loops_preserved_directed(backend):
         _write_graph(src, "g", [0, 1], [(0, 0), (0, 1)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
         _, indices, _ = _read_csr(out_dir, "g")
@@ -142,7 +142,7 @@ def test_edge_properties_preserved(backend):
         _write_graph(src, "g", [0, 1], [(0, 1)], prop=("weight", [2.5]))
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
         _, indices, _ = _read_csr(out_dir, "g")
@@ -158,7 +158,7 @@ def test_empty_edges(backend):
         _write_graph(src, "g", [0, 1, 2], [])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
         _, indices, indptr = _read_csr(out_dir, "g")
@@ -174,7 +174,7 @@ def test_icebug_disk_metadata_written(backend):
         _write_graph(src, "g", [0, 1], [(0, 1)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
 
@@ -190,14 +190,34 @@ def test_schema_cypher_generated(backend):
         _write_graph(src, "g", [0, 1], [(0, 1)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend=backend
+            src, output_dir=Path(tmp) / "out", backend=backend
         )
         out_dir = Path(res[0]["output_dir"])
         schema = (out_dir / "schema.cypher").read_text()
 
         assert "CREATE NODE TABLE g(id INT64, PRIMARY KEY(id))" in schema
-        assert "CREATE REL TABLE g(FROM g TO g)" in schema
+        assert "CREATE REL TABLE g_rel(FROM g TO g)" in schema
         assert "icebug-disk" in schema
+
+
+def test_default_output_dir_csr_suffix_and_schema_names():
+    """Default output dir is <source_dir>-csr; rel table name differs from node."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "graph500-24"
+        src.mkdir()
+        _write_graph(src, "graph500-24", [0, 1], [(0, 1)])
+
+        res = convert_parquet_dir_to_csr(src, backend="pyarrow")
+        assert Path(res[0]["output_dir"]) == Path(tmp) / "graph500-24-csr"
+
+        schema = (Path(res[0]["output_dir"]) / "schema.cypher").read_text()
+        assert "CREATE NODE TABLE graph500_24(id INT64, PRIMARY KEY(id))" in schema
+        assert (
+            "CREATE REL TABLE graph500_24_rel(FROM graph500_24 TO graph500_24)"
+            in schema
+        )
+        # NODE and REL table names must not clash
+        assert "CREATE REL TABLE graph500_24(" not in schema
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "datafusion"])
@@ -209,7 +229,7 @@ def test_memory_limit_accepted(backend):
 
         res = convert_parquet_dir_to_csr(
             src,
-            output_db=Path(tmp) / "out.duckdb",
+            output_dir=Path(tmp) / "out",
             backend=backend,
             memory_limit="128MB",
         )
@@ -303,7 +323,7 @@ def test_graph_name_filter():
         _write_graph(src, "two", [0, 1], [(1, 0)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", graph_name="two", backend="pyarrow"
+            src, output_dir=Path(tmp) / "out", graph_name="two", backend="pyarrow"
         )
         assert [r["name"] for r in res] == ["two"]
 
@@ -315,7 +335,7 @@ def test_multi_graph_output_dirs():
         _write_graph(src, "two", [0, 1], [(1, 0)])
 
         res = convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "out.duckdb", backend="pyarrow"
+            src, output_dir=Path(tmp) / "out", backend="pyarrow"
         )
         assert {r["name"] for r in res} == {"one", "two"}
         dirs = {Path(r["output_dir"]).name for r in res}
@@ -337,11 +357,9 @@ def test_backends_agree(backend):
         _write_graph(src, "g", ids, edges)
 
         convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "base.duckdb", backend="pyarrow"
+            src, output_dir=Path(tmp) / "base", backend="pyarrow"
         )
-        convert_parquet_dir_to_csr(
-            src, output_db=Path(tmp) / "other.duckdb", backend=backend
-        )
+        convert_parquet_dir_to_csr(src, output_dir=Path(tmp) / "other", backend=backend)
 
         base = pq.read_table(Path(tmp) / "base" / "indices_g.parquet")
         base_ptr = pq.read_table(Path(tmp) / "base" / "indptr_g.parquet")

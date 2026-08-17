@@ -29,7 +29,7 @@ def _max_rss_mib() -> float:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source-dir", required=True)
-    ap.add_argument("--output-db", required=True)
+    ap.add_argument("--output-dir", required=True)
     ap.add_argument(
         "--backend", required=True, choices=["pyarrow", "duckdb", "datafusion"]
     )
@@ -39,7 +39,7 @@ def main() -> None:
     start = time.perf_counter()
     results = convert_parquet_dir_to_csr(
         source_dir=args.source_dir,
-        output_db=args.output_db,
+        output_dir=args.output_dir,
         backend=args.backend,
         memory_limit=args.memory_limit,
     )
