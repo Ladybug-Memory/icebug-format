@@ -21,7 +21,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from icebug_format.convert_parquet import resolve_rel_column_names
+from icebug_format.convert_parquet import csr_rel_name, resolve_rel_column_names
 
 
 def _q(name: str) -> str:
@@ -139,10 +139,10 @@ def convert_graph(
             con, "vertices", out_dir / f"nodes_{name}.parquet"
         )
         _write_parquet_with_icebug_metadata(
-            con, "indices", out_dir / f"indices_{name}.parquet"
+            con, "indices", out_dir / f"indices_{csr_rel_name(name)}.parquet"
         )
         _write_parquet_with_icebug_metadata(
-            con, "indptr", out_dir / f"indptr_{name}.parquet"
+            con, "indptr", out_dir / f"indptr_{csr_rel_name(name)}.parquet"
         )
     finally:
         con.close()

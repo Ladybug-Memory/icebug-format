@@ -186,6 +186,30 @@ def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
     return type_map.get(base_type, "STRING")
 
 
+def get_node_display_name(table_name: str) -> str:
+    """Derive the NODE table name used in schema.cypher from a DuckDB table."""
+    if table_name == "nodes":
+        return "nodes"
+    elif table_name.startswith("nodes_"):
+        return table_name[6:].lower()  # Remove "nodes_" prefix and lowercase
+    return table_name.lower()
+
+
+def get_edge_display_name(table_name: str) -> str:
+    """Derive the REL table name used in schema.cypher from a DuckDB table.
+
+    The ``_rel`` suffix keeps the REL table distinct from a same-named NODE
+    table.  LadybugDB derives the ``indices_<rel_name>.parquet`` /
+    ``indptr_<rel_name>.parquet`` filenames from this name, so the parquet
+    export must use the same name.
+    """
+    if table_name == "edges":
+        return "edges"
+    elif table_name.startswith("edges_"):
+        return table_name[6:].lower()  # Remove "edges_" prefix and lowercase
+    return table_name.lower() + "_rel"
+
+
 def generate_schema_cypher(
     con,
     csr_table_name: str,
@@ -211,22 +235,6 @@ def generate_schema_cypher(
         String containing the schema.cypher content
     """
     lines = []
-
-    # Helper to derive display name from table name (lowercase)
-    # nodes => nodes, nodes_person => person, nodes_foo => foo
-    def get_node_display_name(table_name: str) -> str:
-        if table_name == "nodes":
-            return "nodes"
-        elif table_name.startswith("nodes_"):
-            return table_name[6:].lower()  # Remove "nodes_" prefix and lowercase
-        return table_name.lower()
-
-    def get_edge_display_name(table_name: str) -> str:
-        if table_name == "edges":
-            return "edges"
-        elif table_name.startswith("edges_"):
-            return table_name[6:].lower()  # Remove "edges_" prefix and lowercase
-        return table_name.lower() + "_rel"
 
     # Build mapping of original table names to display names
     node_display_names = {nt: get_node_display_name(nt) for nt in node_tables}
@@ -352,20 +360,23 @@ def export_to_parquet_and_cypher(
         _write_parquet_with_icebug_metadata(con, csr_node_table, parquet_file)
         print(f"  Exported: {csr_node_table} -> {parquet_file.name}")
 
-    # Export edge tables: indices_<edge_name>.parquet, indptr_<edge_name>.parquet
+    # Export edge tables: indices_<rel_name>.parquet, indptr_<rel_name>.parquet
+    # (rel_name == the REL table name emitted in schema.cypher, so LadybugDB can
+    #  map the schema TABLE back to its parquet file)
     for edge_table in edge_tables:
         edge_name = (
             edge_table[6:].lower()
             if edge_table.startswith("edges_")
             else edge_table.lower()
         )
+        rel_name = get_edge_display_name(edge_table)
         indices_table = f"{csr_table_name}_indices_{edge_name}"
-        indices_file = parquet_dir / f"indices_{edge_name}.parquet"
+        indices_file = parquet_dir / f"indices_{rel_name}.parquet"
         _write_parquet_with_icebug_metadata(con, indices_table, indices_file)
         print(f"  Exported: {indices_table} -> {indices_file.name}")
 
         indptr_table = f"{csr_table_name}_indptr_{edge_name}"
-        indptr_file = parquet_dir / f"indptr_{edge_name}.parquet"
+        indptr_file = parquet_dir / f"indptr_{rel_name}.parquet"
         _write_parquet_with_icebug_metadata(con, indptr_table, indptr_file)
         print(f"  Exported: {indptr_table} -> {indptr_file.name}")
 

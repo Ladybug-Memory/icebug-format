@@ -33,6 +33,7 @@ import pyarrow.parquet as pq
 from icebug_format.convert_parquet import (
     ICEBUG_DISK_VERSION,
     _write_icebug_parquet,
+    csr_rel_name,
     parse_size_to_bytes,
     resolve_rel_column_names,
 )
@@ -342,7 +343,9 @@ def convert_graph(
         f"FROM relations ORDER BY csr_source, csr_target"
     )
     _stream_to_parquet(
-        ctx.sql(idx_sql), out_dir / f"indices_{name}.parquet", target_to_uint64=True
+        ctx.sql(idx_sql),
+        out_dir / f"indices_{csr_rel_name(name)}.parquet",
+        target_to_uint64=True,
     )
 
     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.
@@ -357,5 +360,7 @@ def convert_graph(
         out_dir / f"nodes_{name}.parquet",
     )
     _write_icebug_parquet(
-        indptr, out_dir / f"indptr_{name}.parquet", compression=_COMPRESSION
+        indptr,
+        out_dir / f"indptr_{csr_rel_name(name)}.parquet",
+        compression=_COMPRESSION,
     )

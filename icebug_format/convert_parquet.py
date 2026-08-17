@@ -8,8 +8,8 @@ icebug-format converter to that layout, producing the same icebug-disk output
 as :mod:`icebug_format.cli` for DuckDB sources:
 
 - ``nodes_<name>.parquet``   vertex table sorted by primary key
-- ``indices_<name>.parquet`` dense target id per edge, sorted by (source, target)
-- ``indptr_<name>.parquet``  CSR row pointers (``N + 1`` entries)
+- ``indices_<name>_rel.parquet`` dense target id per edge, sorted by (source, target)
+- ``indptr_<name>_rel.parquet``  CSR row pointers (``N + 1`` entries)
 - ``schema.cypher``          LadybugDB mount schema
 
 Three interchangeable backends are provided:
@@ -258,6 +258,18 @@ def _arrow_type_to_cypher(t: pa.DataType) -> str:
     return "STRING"
 
 
+def csr_rel_name(graph_name: str) -> str:
+    """Return the REL table name for a homogeneous CSR graph.
+
+    LadybugDB derives the parquet filenames from the schema table names, so the
+    REL table (``<name>_rel``) must match the ``indices_<name>_rel.parquet`` /
+    ``indptr_<name>_rel.parquet`` files written by the backends.  The suffix
+    keeps the REL table distinct from the NODE table, whose name is the graph
+    name itself.
+    """
+    return f"{graph_name}_rel"
+
+
 def _generate_schema_cypher(graph_name: str, output_dir: Path, storage: str) -> str:
     """
     Build schema.cypher for one graph from the parquet files just written.
@@ -265,7 +277,8 @@ def _generate_schema_cypher(graph_name: str, output_dir: Path, storage: str) -> 
     The graph is homogeneous: both edge endpoints use the single vertex table.
     """
     node_pq = output_dir / f"nodes_{graph_name}.parquet"
-    indices_pq = output_dir / f"indices_{graph_name}.parquet"
+    rel_name = csr_rel_name(graph_name)
+    indices_pq = output_dir / f"indices_{rel_name}.parquet"
     node_schema = pq.ParquetFile(node_pq).schema_arrow
     indices_schema = pq.ParquetFile(indices_pq).schema_arrow
 
@@ -284,7 +297,7 @@ def _generate_schema_cypher(graph_name: str, output_dir: Path, storage: str) -> 
     ]
     props_str = (", " + ", ".join(props)) if props else ""
     lines.append(
-        f"CREATE REL TABLE {graph_name}_rel(FROM {graph_name} TO {graph_name}{props_str}) "
+        f"CREATE REL TABLE {rel_name}(FROM {graph_name} TO {graph_name}{props_str}) "
         f"WITH (storage = '{storage}', format = 'icebug-disk');"
     )
     return "\n".join(lines) + "\n"

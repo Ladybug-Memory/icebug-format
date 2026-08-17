@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 from icebug_format.convert_parquet import (
     _build_indptr,
     _write_icebug_parquet,
+    csr_rel_name,
     resolve_rel_column_names,
 )
 
@@ -344,5 +345,5 @@ def convert_graph(
     indices, indptr = _finalize_csr(rel, prop_cols, add_reverse_edges, n_nodes)
 
     _write_icebug_parquet(vtable, out_dir / f"nodes_{name}.parquet")
-    _write_icebug_parquet(indices, out_dir / f"indices_{name}.parquet")
-    _write_icebug_parquet(indptr, out_dir / f"indptr_{name}.parquet")
+    _write_icebug_parquet(indices, out_dir / f"indices_{csr_rel_name(name)}.parquet")
+    _write_icebug_parquet(indptr, out_dir / f"indptr_{csr_rel_name(name)}.parquet")
