@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local benchmark dataset symlink (absolute path, machine-specific)
+/ldbc
+
+# Lockfile is not tracked in this repo
+/uv.lock

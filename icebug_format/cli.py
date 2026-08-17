@@ -712,8 +712,24 @@ def main():
     parser.add_argument(
         "--source-db",
         type=str,
-        required=True,
-        help="Source DuckDB database path",
+        default=None,
+        help="Source DuckDB database path (with nodes_*/edges_* tables)",
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=str,
+        default=None,
+        help="Directory containing vertex/edge Parquet pairs "
+        "('<name>-v.parquet' + '<name>-e.parquet', or 'vertex.parquet' + "
+        "'edge.parquet')",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["auto", "pyarrow", "duckdb", "datafusion"],
+        default="auto",
+        help="Conversion backend for --source-dir input "
+        "(default: auto-detect an installed SQL engine, else pyarrow)",
     )
     parser.add_argument(
         "--output-db",
@@ -778,6 +794,40 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if bool(args.source_db) == bool(args.source_dir):
+        parser.error("exactly one of --source-db or --source-dir must be provided")
+
+    if args.source_dir:
+        from icebug_format.convert_parquet import convert_parquet_dir_to_csr
+
+        print("=== Vertex/Edge Parquet to CSR Format Converter ===\n")
+        print(f"Source directory: {args.source_dir}")
+        print(f"Backend: {args.backend}")
+        print(f"Add reverse edges: {args.add_reverse_edges}")
+        print(f"DuckDB/DataFusion memory limit: {args.memory_limit}")
+
+        output_db = args.output_db or str(
+            Path(args.source_dir).parent / f"{Path(args.source_dir).name}_csr.duckdb"
+        )
+        storage_path = args.storage or f"./{Path(output_db).stem}"
+        print(f"Output directory: {Path(output_db).parent / Path(output_db).stem}")
+
+        results = convert_parquet_dir_to_csr(
+            source_dir=args.source_dir,
+            output_db=output_db,
+            backend=args.backend,
+            add_reverse_edges=args.add_reverse_edges,
+            memory_limit=args.memory_limit,
+            storage=storage_path,
+        )
+        for r in results:
+            print(
+                f"\n✓ Converted graph '{r['name']}' in {r['elapsed']:.2f}s -> "
+                f"{r['output_dir']}"
+            )
+        print("\n=== Conversion Completed Successfully! ===")
+        return
 
     # Infer --output-db and --csr-table from --source-db stem when not provided
     source_stem = Path(args.source_db).stem
