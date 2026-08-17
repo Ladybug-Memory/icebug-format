@@ -41,11 +41,15 @@ ICEBUG_DISK_VERSION = "v1"
 def _write_parquet_with_icebug_metadata(
     con, table_name: str, output_path: Path
 ) -> None:
-    """Export a DuckDB table to parquet with icebug_disk_version metadata."""
+    """Export a DuckDB table to parquet with icebug_disk_version metadata.
+
+    Uses zstd compression (DuckDB's COPY default is snappy) to match the
+    codec of the LDBC input files and keep the output compact.
+    """
     con.execute(
         f"""
         COPY {table_name} TO ?
-        (FORMAT PARQUET, KV_METADATA {{ icebug_disk_version: '{ICEBUG_DISK_VERSION}' }})
+        (FORMAT PARQUET, COMPRESSION ZSTD, KV_METADATA {{ icebug_disk_version: '{ICEBUG_DISK_VERSION}' }})
         """,
         [str(output_path)],
     )
