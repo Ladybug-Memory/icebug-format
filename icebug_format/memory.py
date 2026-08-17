@@ -45,14 +45,16 @@ class IcebugMemGraph:
         *,
         to_node_arrow_table: pa.Table | None = None,
         add_reverse_edges: bool = False,
+        input_sorted: bool = False,
     ) -> "IcebugMemGraph":
         """
         Convert node and relationship Arrow tables to an IcebugMemGraph.
 
         The first column of each node table is treated as the primary key used
-        to map node IDs to dense 0-based CSR indices.  Node tables are sorted
-        by primary key, so the returned ``src``/``dest`` tables are in CSR
-        index order (row ``i`` of ``src`` is CSR node ``i``).
+        to map node IDs to dense 0-based CSR indices.  Unless
+        ``input_sorted=True``, node tables are sorted by primary key, so the
+        returned ``src``/``dest`` tables are in CSR index order (row ``i`` of
+        ``src`` is CSR node ``i``).
 
         The relationship table's source and target columns are resolved by name
         in the following priority order, falling back to positional columns:
@@ -77,6 +79,12 @@ class IcebugMemGraph:
             add_reverse_edges:     If ``False`` (default), only input edges are
                                    stored.  If ``True``, reverse edges are added
                                    for symmetric adjacency.
+            input_sorted:          If ``True``, the caller guarantees the node
+                                   tables are already ordered by primary key,
+                                   so the sort step is skipped and CSR ids are
+                                   assigned by input row position (faster, but
+                                   the mapping is only valid for pre-sorted
+                                   input).  Defaults to ``False``.
 
         Returns:
             IcebugMemGraph where *src* and *dest* are the node tables in CSR
@@ -93,5 +101,6 @@ class IcebugMemGraph:
             rel_arrow_table,
             to_node_table=to_node_arrow_table,
             add_reverse_edges=add_reverse_edges,
+            input_sorted=input_sorted,
         )
         return cls(src=src, dest=dest, indices=indices, indptr=indptr)
