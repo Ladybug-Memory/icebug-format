@@ -1,10 +1,10 @@
 """Shared lazy-import helper for the optional ``duckdb`` dependency.
 
 duckdb is gated behind the ``convert`` (and ``convert-duckdb``) extras so that
-the base package can be imported on a bare install.  Both :mod:`cli` (CSR
-graph conversion) and :mod:`memory` (:meth:`IcebugMemGraph.from_arrow_tables`)
-import duckdb through this single helper, which raises an actionable error when
-the dependency is missing rather than a raw ``ModuleNotFoundError``.
+the base package can be imported on a bare install.  :mod:`cli` (CSR graph
+conversion) imports duckdb through this single helper, which raises an
+actionable error when the dependency is missing rather than a raw
+``ModuleNotFoundError``.
 """
 
 from __future__ import annotations
