@@ -15,6 +15,11 @@ for ``SortPreservingMerge`` to allocate its in-memory merge buffers, so tight
 limits fail with ``ResourcesExhausted``.  The fair pool caps each spillable
 operator's share and guarantees the merge headroom, spilling sort runs and
 window output to the OS temp dir instead of growing resident memory.
+
+The same SQL plan is available from in-memory Arrow tables via
+:func:`build_csr_from_arrow_tables`, which backs
+:meth:`icebug_format.memory.IcebugMemGraph.from_arrow_tables` when a memory
+limit is requested.
 """
 
 from __future__ import annotations
@@ -33,6 +38,14 @@ from icebug_format.convert_parquet import (
 )
 
 _COMPRESSION = "zstd"
+
+# Arrow tables are registered with the engine in chunks of at most this many
+# rows.  A single-chunk table would otherwise arrive as one huge record batch
+# and force operators (e.g. SortExec feeding the ROW_NUMBER window) to reserve
+# the whole table's worth of memory at once, which fails under a tight memory
+# pool.  Small batches keep per-operator reservations bounded so the pool can
+# spill instead.
+_REGISTER_CHUNK_ROWS = 65_536
 
 # Keep SortExec's spill-reservation headroom small: a large value (e.g. a
 # fraction of the pool) makes the final in-memory merge try to reserve far more
@@ -120,6 +133,143 @@ def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
     writer.close()
 
 
+def _indptr_from_degrees(deg: pa.Table, n_nodes: int) -> pa.Table:
+    """Build the ``N + 1`` CSR row-pointer table from a ``(src, deg)`` table."""
+    if n_nodes == 0:
+        return pa.table({"ptr": pa.array([0], type=pa.uint64())})
+    src = deg["src"].cast(pa.int32()).combine_chunks()
+    counts = deg["deg"].combine_chunks()
+    return pa.table(
+        {
+            "ptr": pa.concat_arrays(
+                [
+                    pa.array([0], type=pa.uint64()),
+                    pc.cumulative_sum(
+                        pc.fill_null(pc.scatter(counts, src, max_index=n_nodes - 1), 0)
+                    ).cast(pa.uint64()),
+                ]
+            )
+        }
+    )
+
+
+def _register_table(ctx, name: str, table: pa.Table) -> None:
+    """Register an Arrow table with the DataFusion session in bounded chunks."""
+    batches = table.to_batches(max_chunksize=_REGISTER_CHUNK_ROWS)
+    if batches:
+        ctx.register_record_batches(name, [batches])
+    else:  # empty table: no rows to chunk, register directly
+        ctx.register_table(name, ctx.from_arrow(table))
+
+
+def build_csr_from_arrow_tables(
+    node_table: pa.Table,
+    rel_table: pa.Table,
+    *,
+    to_node_table: pa.Table | None = None,
+    add_reverse_edges: bool = False,
+    memory_limit: str | None = None,
+) -> tuple[pa.Table, pa.Table, pa.Table, pa.Table]:
+    """
+    Build ``(src_out, dst_out, indices, indptr)`` with the DataFusion engine.
+
+    Same contract as :func:`icebug_format._convert_pyarrow.build_csr_from_tables`
+    (the pure-PyArrow path), but the node sort, endpoint mapping and
+    ``(source, target)`` sort run inside DataFusion so *memory_limit* bounds
+    the engine's memory pool and spillable operators write to the OS temp dir
+    instead of growing RSS.  Mirrors :func:`convert_graph` for Parquet pairs,
+    with the vertex/edge tables registered from Arrow rather than Parquet
+    files.  Node tables are always ordered by primary key (there is no
+    ``input_sorted`` shortcut).
+    """
+    from icebug_format._datafusion import require_datafusion
+
+    if add_reverse_edges and to_node_table is not None:
+        raise ValueError(
+            "to_node_arrow_table must not be provided when adding reverse edges; "
+            "from and to node tables must be the same."
+        )
+    if rel_table.num_columns < 2:
+        raise ValueError(
+            f"rel_table must have at least 2 columns (source and target), "
+            f"got {rel_table.num_columns}"
+        )
+
+    if to_node_table is None:
+        to_node_table = node_table
+
+    src_pk = node_table.schema.names[0]
+    dst_pk = to_node_table.schema.names[0]
+    src_col, dst_col = resolve_rel_column_names(rel_table.schema.names)
+    prop_cols = [c for c in rel_table.schema.names if c not in (src_col, dst_col)]
+    n_src = len(node_table)
+
+    datafusion = require_datafusion("the 'convert-datafusion' feature")
+    ctx = _build_context(datafusion, memory_limit)
+    _register_table(ctx, "vertices", node_table)
+    _register_table(ctx, "vertices_dst", to_node_table)
+    _register_table(ctx, "edges", rel_table)
+
+    def _map_view(table: str, pk: str) -> str:
+        return (
+            f"SELECT {_q(pk)} AS original_node_id, "
+            f"CAST(ROW_NUMBER() OVER (ORDER BY {_q(pk)}) AS BIGINT) - 1 "
+            f"AS csr_index FROM {table}"
+        )
+
+    ctx.register_view("src_map", ctx.sql(_map_view("vertices", src_pk)))
+    ctx.register_view("dst_map", ctx.sql(_map_view("vertices_dst", dst_pk)))
+
+    props_fwd = ", " + ", ".join(f"e.{_q(c)}" for c in prop_cols) if prop_cols else ""
+    # Columns of the `relations` view (no table alias in scope there).
+    props_plain = (", " + ", ".join(_q(c) for c in prop_cols)) if prop_cols else ""
+    join_clause = f"""
+        FROM edges e
+        JOIN src_map m1 ON e.{_q(src_col)} = m1.original_node_id
+        JOIN dst_map m2 ON e.{_q(dst_col)} = m2.original_node_id
+    """
+    if not add_reverse_edges:
+        rel_sql = (
+            f"SELECT m1.csr_index AS csr_source, m2.csr_index AS csr_target"
+            f"{props_fwd} {join_clause}"
+        )
+    else:
+        # Self-loops appear once (forward only); non-self edges get both directions.
+        rel_sql = f"""
+            SELECT m1.csr_index AS csr_source, m2.csr_index AS csr_target{props_fwd}
+            {join_clause}
+            UNION ALL
+            SELECT m2.csr_index AS csr_source, m1.csr_index AS csr_target{props_fwd}
+            {join_clause}
+            WHERE e.{_q(src_col)} != e.{_q(dst_col)}
+        """
+    ctx.register_view("relations", ctx.sql(rel_sql))
+
+    # indices: neighbour list sorted by (source, target).
+    indices = ctx.sql(
+        f"SELECT CAST(csr_target AS BIGINT) AS target{props_plain} "
+        f"FROM relations ORDER BY csr_source, csr_target"
+    ).to_arrow_table()
+    i = indices.schema.get_field_index("target")
+    indices = indices.set_column(
+        i, indices.schema.field(i).name, indices.column(i).cast(pa.uint64())
+    )
+
+    # indptr: degrees from a GROUP BY, then histogram + prefix sum.
+    deg = ctx.sql(
+        "SELECT csr_source AS src, COUNT(*) AS deg FROM relations GROUP BY csr_source"
+    ).to_arrow_table()
+    indptr = _indptr_from_degrees(deg, n_src)
+
+    # vertices: ordered by primary key.
+    src_out = ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(src_pk)}").to_arrow_table()
+    dst_out = ctx.sql(
+        f"SELECT * FROM vertices_dst ORDER BY {_q(dst_pk)}"
+    ).to_arrow_table()
+
+    return src_out, dst_out, indices, indptr
+
+
 def convert_graph(
     graph: dict,
     add_reverse_edges: bool = False,
@@ -196,26 +346,10 @@ def convert_graph(
     )
 
     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.
-    deg_df = ctx.sql(
+    deg = ctx.sql(
         "SELECT csr_source AS src, COUNT(*) AS deg FROM relations GROUP BY csr_source"
-    )
-    deg = deg_df.to_arrow_table()
-    src = deg["src"].cast(pa.int32()).combine_chunks()
-    counts = deg["deg"].combine_chunks()
-    indptr = pa.table(
-        {
-            "ptr": pa.concat_arrays(
-                [
-                    pa.array([0], type=pa.uint64()),
-                    pc.cumulative_sum(
-                        pc.fill_null(pc.scatter(counts, src, max_index=n_nodes - 1), 0)
-                    ).cast(pa.uint64()),
-                ]
-            )
-        }
-    )
-    if n_nodes == 0:
-        indptr = pa.table({"ptr": pa.array([0], type=pa.uint64())})
+    ).to_arrow_table()
+    indptr = _indptr_from_degrees(deg, n_nodes)
 
     # vertices: copy through (already sorted by primary key) and write outputs.
     _stream_to_parquet(

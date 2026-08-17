@@ -30,6 +30,7 @@ backend           characteristics
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import time
@@ -313,7 +314,7 @@ def _build_indptr(csr_source: pa.Array, n_nodes: int) -> pa.Array:
 # ---------------------------------------------------------------------------
 
 
-def _select_backend(backend: str) -> Callable:
+def _select_backend(backend: str, memory_limit: str | None = None) -> Callable:
     """Return the converter callable for the requested backend."""
     if backend == "pyarrow":
         from icebug_format import _convert_pyarrow
@@ -328,6 +329,11 @@ def _select_backend(backend: str) -> Callable:
 
         return _convert_datafusion.convert_graph
     if backend == "auto":
+        if memory_limit and importlib.util.find_spec("datafusion") is not None:
+            # A memory limit is enforced via DataFusion's fair spill pool;
+            # DuckDB's external sort needs large temp-disk headroom that a
+            # tight limit may exceed, so prefer datafusion when available.
+            return _select_backend("datafusion")
         try:
             from icebug_format import _convert_duckdb
 
@@ -405,7 +411,7 @@ def convert_parquet_dir_to_csr(
 
     storage_path = storage if storage is not None else f"./{Path(output_db).stem}"
 
-    convert = _select_backend(backend)
+    convert = _select_backend(backend, memory_limit)
     results: list[dict] = []
     for g, out_dir in zip(graphs, out_dirs):
         out_dir.mkdir(parents=True, exist_ok=True)

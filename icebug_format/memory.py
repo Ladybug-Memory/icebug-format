@@ -7,9 +7,12 @@ parquet files, graph data is stored as PyArrow tables in a CSR
 
 The conversion is performed by the pure-PyArrow pipeline in
 :mod:`icebug_format._convert_pyarrow` (the same engine behind the
-``pyarrow`` Parquet-pair backend); DuckDB is not required.
+``pyarrow`` Parquet-pair backend); DuckDB is not required.  When a memory
+limit is requested (or ``backend="datafusion"``), the DataFusion SQL engine
+is used instead so sorts can spill to disk.
 """
 
+import warnings
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -46,6 +49,8 @@ class IcebugMemGraph:
         to_node_arrow_table: pa.Table | None = None,
         add_reverse_edges: bool = False,
         input_sorted: bool = False,
+        backend: str = "pyarrow",
+        memory_limit: str | None = None,
     ) -> "IcebugMemGraph":
         """
         Convert node and relationship Arrow tables to an IcebugMemGraph.
@@ -84,7 +89,22 @@ class IcebugMemGraph:
                                    so the sort step is skipped and CSR ids are
                                    assigned by input row position (faster, but
                                    the mapping is only valid for pre-sorted
-                                   input).  Defaults to ``False``.
+                                   input).  Ignored by the ``"datafusion"``
+                                   backend, which always sorts by primary key.
+                                   Defaults to ``False``.
+            backend:               Conversion engine: ``"pyarrow"`` (default;
+                                   pure in-memory pipeline) or ``"datafusion"``
+                                   (SQL engine, requires the
+                                   ``convert-datafusion`` extra).  When
+                                   *memory_limit* is set and *backend* is left
+                                   at the default, the backend automatically
+                                   switches to ``"datafusion"`` because the
+                                   pyarrow pipeline cannot bound its memory.
+            memory_limit:          Cap on the memory the SQL engine may use
+                                   for sorting (size string like ``"4GB"``,
+                                   percent of RAM like ``"50%"``, or a GB
+                                   number); sorts spill to disk.  Only honored
+                                   by the ``"datafusion"`` backend.
 
         Returns:
             IcebugMemGraph where *src* and *dest* are the node tables in CSR
@@ -95,12 +115,38 @@ class IcebugMemGraph:
             ValueError: If *rel_arrow_table* has fewer than 2 columns.
             ValueError: If ``add_reverse_edges=True`` and *to_node_arrow_table*
                         is provided.
+            ValueError: If *backend* is not ``"pyarrow"`` or ``"datafusion"``.
         """
-        src, dest, indices, indptr = build_csr_from_tables(
-            from_node_arrow_table,
-            rel_arrow_table,
-            to_node_table=to_node_arrow_table,
-            add_reverse_edges=add_reverse_edges,
-            input_sorted=input_sorted,
-        )
+        if backend not in ("pyarrow", "datafusion"):
+            raise ValueError(
+                f"Unknown backend {backend!r}; expected 'pyarrow' or 'datafusion'"
+            )
+        if backend == "pyarrow" and memory_limit:
+            warnings.warn(
+                "memory_limit is not supported by the pyarrow backend; "
+                "switching to the datafusion backend",
+                stacklevel=2,
+            )
+            backend = "datafusion"
+
+        if backend == "datafusion":
+            from icebug_format._convert_datafusion import (
+                build_csr_from_arrow_tables as _df_build_csr,
+            )
+
+            src, dest, indices, indptr = _df_build_csr(
+                from_node_arrow_table,
+                rel_arrow_table,
+                to_node_table=to_node_arrow_table,
+                add_reverse_edges=add_reverse_edges,
+                memory_limit=memory_limit,
+            )
+        else:
+            src, dest, indices, indptr = build_csr_from_tables(
+                from_node_arrow_table,
+                rel_arrow_table,
+                to_node_table=to_node_arrow_table,
+                add_reverse_edges=add_reverse_edges,
+                input_sorted=input_sorted,
+            )
         return cls(src=src, dest=dest, indices=indices, indptr=indptr)
