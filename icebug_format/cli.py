@@ -226,7 +226,7 @@ def generate_schema_cypher(
             return "edges"
         elif table_name.startswith("edges_"):
             return table_name[6:].lower()  # Remove "edges_" prefix and lowercase
-        return table_name.lower()
+        return table_name.lower() + "_rel"
 
     # Build mapping of original table names to display names
     node_display_names = {nt: get_node_display_name(nt) for nt in node_tables}
@@ -377,7 +377,7 @@ def export_to_parquet_and_cypher(
         edge_tables,
         parquet_dir,
         edge_relationships,
-        node_type_to_table
+        node_type_to_table,
     )
     schema_file = parquet_dir / "schema.cypher"
     schema_file.write_text(schema_cypher)
@@ -732,6 +732,12 @@ def main():
         "(default: auto-detect an installed SQL engine, else pyarrow)",
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Output directory for icebug-disk Parquet files (--source-dir only; "
+        "default: <source-dir>-csr)",
+    )
+    parser.add_argument(
         "--output-db",
         type=str,
         help="Output DuckDB database path",
@@ -772,7 +778,7 @@ def main():
         "--storage",
         type=str,
         default=None,
-        help="Storage path for schema.cypher (default: output_db path without .duckdb extension)",
+        help="Storage path recorded in schema.cypher (default: derived from the output path)",
     )
     parser.add_argument(
         "--schema",
@@ -807,15 +813,15 @@ def main():
         print(f"Add reverse edges: {args.add_reverse_edges}")
         print(f"DuckDB/DataFusion memory limit: {args.memory_limit}")
 
-        output_db = args.output_db or str(
-            Path(args.source_dir).parent / f"{Path(args.source_dir).name}_csr.duckdb"
+        output_dir = args.output_dir or str(
+            Path(args.source_dir).parent / f"{Path(args.source_dir).name}-csr"
         )
-        storage_path = args.storage or f"./{Path(output_db).stem}"
-        print(f"Output directory: {Path(output_db).parent / Path(output_db).stem}")
+        storage_path = args.storage or f"./{Path(output_dir).name}"
+        print(f"Output directory: {output_dir}")
 
         results = convert_parquet_dir_to_csr(
             source_dir=args.source_dir,
-            output_db=output_db,
+            output_dir=output_dir,
             backend=args.backend,
             add_reverse_edges=args.add_reverse_edges,
             memory_limit=args.memory_limit,
