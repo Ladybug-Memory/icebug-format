@@ -10,6 +10,7 @@ import pytest
 from icebug_format.convert_parquet import (
     convert_parquet_dir_to_csr,
     discover_graphs,
+    parse_size_to_bytes,
     resolve_rel_column_names,
     sanitize_graph_name,
 )
@@ -197,6 +198,47 @@ def test_schema_cypher_generated(backend):
         assert "CREATE NODE TABLE g(id INT64, PRIMARY KEY(id))" in schema
         assert "CREATE REL TABLE g(FROM g TO g)" in schema
         assert "icebug-disk" in schema
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "datafusion"])
+def test_memory_limit_accepted(backend):
+    """SQL backends honor memory_limit; output is unchanged."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp)
+        _write_graph(src, "g", [0, 1, 2], [(0, 1), (2, 0), (1, 1)])
+
+        res = convert_parquet_dir_to_csr(
+            src,
+            output_db=Path(tmp) / "out.duckdb",
+            backend=backend,
+            memory_limit="128MB",
+        )
+        out_dir = Path(res[0]["output_dir"])
+        _, indices, indptr = _read_csr(out_dir, "g")
+
+        assert indices["target"].to_pylist() == [1, 1, 0]
+        assert indptr["ptr"].to_pylist() == [0, 1, 2, 3]
+
+
+def test_parse_size_to_bytes():
+    assert parse_size_to_bytes(None) is None
+    assert parse_size_to_bytes("") is None
+    assert parse_size_to_bytes("0") is None
+    assert parse_size_to_bytes("0GB") is None
+    assert parse_size_to_bytes("32") == 32 << 30  # bare number => GB
+    assert parse_size_to_bytes("0.5") == int(0.5 * (1 << 30))
+    assert parse_size_to_bytes("32GB") == 32 << 30
+    assert parse_size_to_bytes("2GiB") == 2 << 30
+    assert parse_size_to_bytes("1500MB") == 1500 << 20
+    assert parse_size_to_bytes("1.5GB") == int(1.5 * (1 << 30))
+    assert parse_size_to_bytes("10KB") == 10 << 10
+    # percent of physical RAM
+    pct = parse_size_to_bytes("50%")
+    assert pct is not None and pct > 0
+    with pytest.raises(ValueError):
+        parse_size_to_bytes("lots")
+    with pytest.raises(ValueError):
+        parse_size_to_bytes("%")
 
 
 def test_discover_graphs_ldbc_and_generic_layouts():

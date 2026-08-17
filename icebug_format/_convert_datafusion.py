@@ -3,9 +3,18 @@
 Runs the same relational plan as the DuckDB backend on Apache DataFusion
 (``convert-datafusion`` extra).  Unlike the DuckDB backend, results are pulled
 out of the engine with ``execute_stream()`` and streamed into Parquet with
-``pyarrow.parquet.ParquetWriter``, so only a bounded working set (the sort
-window) is ever resident.  This gives the lowest peak RSS of the three
-backends for large graphs.
+``pyarrow.parquet.ParquetWriter``, so only a bounded working set is ever
+resident.
+
+When ``memory_limit`` is given it is enforced as a spill-aware memory pool on
+the session's ``RuntimeEnv`` (the Python binding for DataFusion's runtime
+memory limit) plus the ``datafusion.execution.sort_*`` session options that
+tune SortExec's spilling.  A *fair* spill pool is used (not greedy): greedy
+lets the sort buffer until the pool is completely full, leaving no headroom
+for ``SortPreservingMerge`` to allocate its in-memory merge buffers, so tight
+limits fail with ``ResourcesExhausted``.  The fair pool caps each spillable
+operator's share and guarantees the merge headroom, spilling sort runs and
+window output to the OS temp dir instead of growing resident memory.
 """
 
 from __future__ import annotations
@@ -19,14 +28,57 @@ import pyarrow.parquet as pq
 from icebug_format.convert_parquet import (
     ICEBUG_DISK_VERSION,
     _write_icebug_parquet,
+    parse_size_to_bytes,
     resolve_rel_column_names,
 )
 
 _COMPRESSION = "zstd"
 
+# Keep SortExec's spill-reservation headroom small: a large value (e.g. a
+# fraction of the pool) makes the final in-memory merge try to reserve far more
+# than the pool can hand out and fails with ResourcesExhausted.  A modest ~64
+# MiB cap guarantees the merge buffers while leaving the rest of the pool to
+# the sort data.
+_SPILL_RESERVATION_FLOOR = 1 << 20  # 1 MiB
+_SPILL_RESERVATION_CAP = 1 << 26  # 64 MiB
+_IN_PLACE_FLOOR = 1 << 20  # 1 MiB
+_IN_PLACE_CAP = 1 << 26  # 64 MiB
+
 
 def _q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+
+def _build_context(datafusion, memory_limit: str | None):
+    """Return a ``SessionContext`` that honors *memory_limit* as a spill pool.
+
+    Without a limit (or with an unparseable/non-positive one) a default
+    ``SessionContext`` is returned.  With a limit, the session's runtime uses
+    a fair spill pool of that size (the Python equivalent of DataFusion's
+    ``datafusion.runtime.memory_limit``; greedy cannot be used because it does
+    not leave the headroom ``SortPreservingMerge`` needs to allocate its
+    in-memory merge buffers) and SortExec is tuned to spill through
+    ``datafusion.execution.sort_spill_reservation_bytes`` and
+    ``datafusion.execution.sort_in_place_threshold_bytes``.
+    """
+    if not memory_limit:
+        return datafusion.SessionContext()
+    limit_bytes = parse_size_to_bytes(memory_limit)
+    if not limit_bytes:
+        return datafusion.SessionContext()
+
+    spill_reservation = min(
+        max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
+    )
+    in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
+    config = datafusion.SessionConfig(
+        {
+            "datafusion.execution.sort_spill_reservation_bytes": str(spill_reservation),
+            "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
+        }
+    )
+    runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
+    return datafusion.SessionContext(config=config, runtime=runtime)
 
 
 def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
@@ -75,9 +127,9 @@ def convert_graph(
 ) -> None:
     """Convert one vertex/edge Parquet pair with the DataFusion SQL engine.
 
-    ``memory_limit`` is accepted for interface compatibility with the DuckDB
-    backend; datafusion 54's Python bindings do not expose operator memory
-    limits (``SessionConfig``), so it is not applied.
+    ``memory_limit`` bounds the session's memory pool (size string, percent of
+    RAM, or GB number); sorts and window operators spill to disk when the pool
+    is exhausted instead of growing RSS.
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -95,7 +147,7 @@ def convert_graph(
     prop_cols = [c for c in ef.schema_arrow.names if c not in (src_col, dst_col)]
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = datafusion.SessionContext()
+    ctx = _build_context(datafusion, memory_limit)
     ctx.register_parquet("vertices", vertex_path)
     ctx.register_parquet("edges", edge_path)
 
