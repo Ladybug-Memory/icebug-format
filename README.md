@@ -23,6 +23,32 @@ uv run icebug-format \
   --schema examples/karate/duckdb/schema.cypher      // input schema for rel tables
 ```
 
+### Vertex/edge Parquet pairs (LDBC-style datasets)
+
+Benchmark datasets such as the ones under `ldbc/` ship as a vertex table
+(`<name>-v.parquet`, first column is the node id) and an edge table
+(`<name>-e.parquet` with `source`/`target` columns), or as plain
+`vertex.parquet` / `edge.parquet`. Pass the directory to `--source-dir` instead
+of `--source-db`:
+
+```bash
+uv run icebug-format --source-dir ldbc/cit-Patents --backend pyarrow
+```
+
+Three interchangeable conversion backends are available (select with
+`--backend`, default `auto`):
+
+| Backend | Extra | Characteristics |
+|---|---|---|
+| `pyarrow` | (none) | Pure in-memory PyArrow pipeline: dense-id lookup tables + radix sort. Fastest; RSS scales with edge count. |
+| `duckdb` | `convert` | DuckDB SQL engine with external sort (bounded by `--memory-limit`). |
+| `datafusion` | `convert-datafusion` | Apache DataFusion SQL engine; streams results with `execute_stream()`. Lowest RSS for large graphs. |
+
+In this mode the output is the icebug-disk Parquet directory + `schema.cypher`
+(there is no intermediate DuckDB database file). The output directory is named
+after `--output-db`'s stem; with multiple graphs in one source directory each
+graph gets its own subdirectory.
+
 ### Output structure
 
 For each node table `nodes_<name>` and edge table `edges_<name>`, the following files/tables are produced:
