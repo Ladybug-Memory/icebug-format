@@ -4,14 +4,26 @@
 Used by benchmark_ldbc.py as the subprocess target so each backend gets a clean
 interpreter and its peak RSS is measured from process start (python startup +
 imports included, which is a small constant for all backends).
+
+Note: ``ru_maxrss`` is reported in bytes on macOS but in KiB on Linux/BSD,
+so it is normalized to MiB accordingly.
 """
 
 import argparse
 import json
 import resource
+import sys
 import time
 
 from icebug_format.convert_parquet import convert_parquet_dir_to_csr
+
+
+def _max_rss_mib() -> float:
+    """Return peak RSS in MiB, normalizing per-platform ``ru_maxrss`` units."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return rss / (1024 * 1024)  # bytes on macOS
+    return rss / 1024  # KiB on Linux/BSD
 
 
 def main() -> None:
@@ -32,13 +44,12 @@ def main() -> None:
         memory_limit=args.memory_limit,
     )
     elapsed = time.perf_counter() - start
-    rss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     print(
         json.dumps(
             {
                 "backend": args.backend,
                 "elapsed_s": round(elapsed, 3),
-                "max_rss_mib": round(rss_kib / 1024, 1),
+                "max_rss_mib": round(_max_rss_mib(), 1),
                 "graphs": results,
             }
         )
