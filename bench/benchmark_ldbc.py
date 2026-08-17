@@ -72,11 +72,17 @@ def main() -> None:
     rows = []
     for backend in BACKENDS:
         samples = []
+        failed = None
         for rep in range(1, args.repeats + 1):
             run_dir = Path(
                 tempfile.mkdtemp(dir=str(out_dir), prefix=f"{backend}_{rep}_")
             )
-            result = run_one(source_dir, run_dir, backend, args.memory_limit)
+            try:
+                result = run_one(source_dir, run_dir, backend, args.memory_limit)
+            except RuntimeError as exc:
+                failed = str(exc).splitlines()[0][:160]
+                print(f"  {backend:11s} rep {rep}: FAILED - {failed}", file=sys.stderr)
+                break
             elapsed = result["elapsed_s"]
             rss = result["max_rss_mib"]
             print(
@@ -86,7 +92,10 @@ def main() -> None:
             samples.append((elapsed, rss))
             if not args.keep:
                 shutil.rmtree(run_dir, ignore_errors=True)
-        rows.append((backend, samples))
+        if failed is not None:
+            rows.append((backend, None, failed))
+        else:
+            rows.append((backend, samples, None))
 
     def fmt(values: list[float]) -> str:
         median = statistics.median(values)
@@ -94,10 +103,14 @@ def main() -> None:
         return f"{median:7.2f} [{lo:.2f}, {hi:.2f}]"
 
     print(f"\nDataset: {source_dir}")
+    print(f"Memory limit: {args.memory_limit or 'none'}")
     print("Backend     | Runtime (s, median [min,max])")
     print("            | Peak RSS (MiB, median [min,max])")
     print("------------|----------------------------------")
-    for backend, samples in rows:
+    for backend, samples, failed in rows:
+        if failed is not None:
+            print(f"{backend:11s} | FAILED: {failed}")
+            continue
         etimes = [s[0] for s in samples]
         rsses = [s[1] for s in samples]
         print(f"{backend:11s} | {fmt(etimes)} | {fmt(rsses)}")
