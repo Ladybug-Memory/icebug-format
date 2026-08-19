@@ -473,6 +473,9 @@ def create_csr_graph_to_duckdb(
     set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
     set_threads(con, threads)
+    # Disable insertion-order preservation to reduce memory/disk usage during
+    # the external sort of large edge sets.
+    con.execute("SET preserve_insertion_order = false")
 
     # Drop all existing tables to recreate from scratch
     result = con.execute("SHOW TABLES").fetchall()
