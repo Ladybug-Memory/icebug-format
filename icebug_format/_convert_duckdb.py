@@ -41,6 +41,7 @@ def convert_graph(
         _write_parquet_with_icebug_metadata,
         set_max_temp_dir_size,
         set_memory_limit,
+        step_progress,
     )
 
     name = graph["name"]
@@ -102,16 +103,18 @@ def convert_graph(
                 SELECT {select_rev} {join_clause}
                 WHERE e.{_q(src_col)} != e.{_q(dst_col)}
             """
-        con.execute(f"CREATE TABLE relations AS {rel_query}")
+        with step_progress("Joining and mapping edges (duckdb)"):
+            con.execute(f"CREATE TABLE relations AS {rel_query}")
 
         # indices: neighbour list sorted by (source, target)
-        select_props = (", " + ", ".join(_q(c) for c in prop_cols)) if prop_cols else ""
-        con.execute(f"""
-            CREATE TABLE indices AS
-            SELECT csr_target::UBIGINT AS target{select_props}
-            FROM relations
-            ORDER BY csr_source, csr_target
-            """)
+        select_props = ", " + ", ".join(_q(c) for c in prop_cols) if prop_cols else ""
+        with step_progress("Sorting edges (duckdb)"):
+            con.execute(f"""
+                CREATE TABLE indices AS
+                SELECT csr_target::UBIGINT AS target{select_props}
+                FROM relations
+                ORDER BY csr_source, csr_target
+                """)
 
         # indptr: cumulative degree per source node, zero-filled, N+1 entries.
         con.execute(f"""

@@ -33,6 +33,8 @@ import os
 import re
 from pathlib import Path
 
+from tqdm import tqdm
+
 from icebug_format._duckdb import require_duckdb as _require_duckdb
 
 ICEBUG_DISK_VERSION = "v1"
@@ -165,6 +167,16 @@ def set_max_temp_dir_size(con, max_tmp_dir_gb: float | None) -> None:
     if max_tmp_dir_gb is None:
         return
     con.execute(f"PRAGMA max_temp_directory_size='{max_tmp_dir_gb:g}GiB'")
+
+
+def step_progress(desc: str):
+    """Return a tqdm elapsed-mode bar for one-shot SQL steps.
+
+    DuckDB executes each ``CREATE TABLE ... AS`` in a single call, so there are
+    no intermediate row counts to report; the bar shows the elapsed time and
+    leaves the final duration on screen.
+    """
+    return tqdm(total=None, desc=desc, bar_format="{desc}: {elapsed_s:.1f}s")
 
 
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
@@ -633,7 +645,8 @@ def create_csr_graph_to_duckdb(
                         WHERE e.source != e.target
                     """
 
-            con.execute(f"CREATE TABLE relations_{edge_name} AS {rel_query};")
+            with step_progress(f"    Joining edges for {et}"):
+                con.execute(f"CREATE TABLE relations_{edge_name} AS {rel_query};")
 
             result = con.execute(
                 f"SELECT COUNT(*) FROM relations_{edge_name}"
@@ -679,12 +692,13 @@ def create_csr_graph_to_duckdb(
 
             # Build CSR indices for this edge type
             indices_table = f"{csr_table_name}_indices_{edge_name}"
-            con.execute(f"""
-                CREATE TABLE {indices_table} AS
-                SELECT csr_target::UBIGINT AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
-                FROM relations_{edge_name}
-                ORDER BY csr_source, csr_target;
-            """)
+            with step_progress(f"    Sorting edges for {et}"):
+                con.execute(f"""
+                    CREATE TABLE {indices_table} AS
+                    SELECT csr_target::UBIGINT AS target{', ' + ', '.join(edge_cols) if edge_cols else ''}
+                    FROM relations_{edge_name}
+                    ORDER BY csr_source, csr_target;
+                """)
 
             result = con.execute(f"SELECT COUNT(*) FROM {indices_table}").fetchone()
             indices_size = result[0] if result else 0
