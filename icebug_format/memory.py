@@ -53,6 +53,7 @@ class IcebugMemGraph:
         backend: str = "pyarrow",
         memory_limit: str | None = None,
         max_tmp_dir_gb: float | None = None,
+        threads: int | None = None,
     ) -> "IcebugMemGraph":
         """
         Convert node and relationship Arrow tables to an IcebugMemGraph.
@@ -114,6 +115,11 @@ class IcebugMemGraph:
                                    ``datafusion.runtime.max_temp_directory_size``).
                                    Only honored by the ``"duckdb"`` and
                                    ``"datafusion"`` backends.
+            threads:               Worker thread count for the SQL engines
+                                   (DuckDB's ``threads`` setting, DataFusion's
+                                   ``datafusion.execution.target_partitions``).
+                                   Only honored by the ``"duckdb"`` and
+                                   ``"datafusion"`` backends.
 
         Returns:
             IcebugMemGraph where *src* and *dest* are the node tables in CSR
@@ -153,6 +159,7 @@ class IcebugMemGraph:
                 memory_limit=memory_limit,
                 max_tmp_dir_gb=max_tmp_dir_gb,
                 input_sorted=input_sorted,
+                threads=threads,
             )
         elif backend == "duckdb":
             from icebug_format._convert_duckdb import (
@@ -167,6 +174,7 @@ class IcebugMemGraph:
                 memory_limit=memory_limit,
                 max_tmp_dir_gb=max_tmp_dir_gb,
                 input_sorted=input_sorted,
+                threads=threads,
             )
         else:
             src, dest, indices, indptr = build_csr_from_tables(

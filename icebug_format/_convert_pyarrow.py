@@ -329,15 +329,16 @@ def convert_graph(
     memory_limit: str | None = None,
     max_tmp_dir_gb: float | None = None,
     input_sorted: bool = False,
+    threads: int | None = None,
 ) -> None:
     """
     Convert one vertex/edge Parquet pair with the pure-PyArrow pipeline.
 
-    ``memory_limit`` and ``max_tmp_dir_gb`` are accepted for interface
-    compatibility with the SQL backends but are not used (pyarrow manages its
-    own memory).  ``input_sorted`` skips the node-table sort: CSR ids are then
-    assigned by row position, which is only valid when the vertex parquet is
-    already ordered by primary key.
+    ``memory_limit``, ``max_tmp_dir_gb`` and ``threads`` are accepted for
+    interface compatibility with the SQL backends but are not used (pyarrow
+    manages its own memory and threads).  ``input_sorted`` skips the
+    node-table sort: CSR ids are then assigned by row position, which is only
+    valid when the vertex parquet is already ordered by primary key.
     """
     name = graph["name"]
     out_dir = Path(graph["output_dir"])

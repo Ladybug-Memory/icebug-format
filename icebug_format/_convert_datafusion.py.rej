@@ -1,0 +1,15 @@
+@@ -343,7 +389,14 @@
+         f"FROM relations ORDER BY csr_source, csr_target"
+     )
+     _stream_to_parquet(
++<<<<<<< Updated upstream
+         ctx.sql(idx_sql), out_dir / f"indices_{name}.parquet", target_to_uint64=True
++=======
++        ctx.sql(idx_sql),
++        out_dir / f"indices_{csr_rel_name(name)}.parquet",
++        target_to_uint64=True,
++        plain_columns=["target"],
++>>>>>>> Stashed changes
+     )
+
+     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.

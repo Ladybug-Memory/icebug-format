@@ -29,7 +29,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from tqdm import tqdm
 
 from icebug_format.convert_parquet import (
     ICEBUG_DISK_VERSION,
@@ -40,15 +39,6 @@ from icebug_format.convert_parquet import (
 )
 
 _COMPRESSION = "zstd"
-
-# Row groups are flushed on every ``ParquetWriter.write_table``/``write_batch``
-# call (the default row group size is ``min(rows, 1 MiB)`` *per call*, not
-# accumulated across calls), so DataFusion's 8192-row stream batches would each
-# become their own tiny row group, fragmenting zstd's compression window and
-# row-group metadata.  Buffer batches to this many rows and write each chunk as
-# a single row group.  122880 matches the row-group size of the LDBC input
-# parquet files (DuckDB's writer).
-_ROWS_PER_ROW_GROUP = 122880
 
 # Arrow tables are registered with the engine in chunks of at most this many
 # rows.  A single-chunk table would otherwise arrive as one huge record batch
@@ -73,31 +63,8 @@ def _q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _datafusion_temp_size(gb: float) -> str:
-    """Format a GB number as a DataFusion ``max_temp_directory_size`` value.
-
-    The ``SET datafusion.runtime.max_temp_directory_size`` path only accepts
-    integer sizes with ``K``/``M``/``G`` units, so the byte count is expressed
-    in the largest integral binary unit (e.g. 10 -> ``'10G'``, 1.5 ->
-    ``'1536M'``).
-    """
-    size = max(1, int(round(gb * (1 << 30))))
-    if size % (1 << 30) == 0:
-        return f"{size >> 30}G"
-    if size % (1 << 20) == 0:
-        return f"{size >> 20}M"
-    return f"{size >> 10}K"
-
-
-def _build_context(
-    datafusion,
-    memory_limit: str | None,
-    max_tmp_dir_gb: float | None = None,
-    threads: int | None = None,
-):
-    """Return a ``SessionContext`` that honors *memory_limit* as a spill pool,
-    *max_tmp_dir_gb* as the temp directory size cap, and *threads* as the
-    worker partition count.
+def _build_context(datafusion, memory_limit: str | None):
+    """Return a ``SessionContext`` that honors *memory_limit* as a spill pool.
 
     Without a limit (or with an unparseable/non-positive one) a default
     ``SessionContext`` is returned.  With a limit, the session's runtime uses
@@ -106,52 +73,29 @@ def _build_context(
     not leave the headroom ``SortPreservingMerge`` needs to allocate its
     in-memory merge buffers) and SortExec is tuned to spill through
     ``datafusion.execution.sort_spill_reservation_bytes`` and
-    ``datafusion.execution.sort_in_place_threshold_bytes``.  With a temp dir
-    size, ``datafusion.runtime.max_temp_directory_size`` caps how much spill
-    data may accumulate on disk (the DataFusion analogue of DuckDB's
-    ``max_temp_directory_size`` PRAGMA).  With a thread count,
-    ``datafusion.execution.target_partitions`` bounds operator parallelism
-    (the DataFusion analogue of DuckDB's ``threads``).
+    ``datafusion.execution.sort_in_place_threshold_bytes``.
     """
-    if not memory_limit and not max_tmp_dir_gb and threads is None:
+    if not memory_limit:
+        return datafusion.SessionContext()
+    limit_bytes = parse_size_to_bytes(memory_limit)
+    if not limit_bytes:
         return datafusion.SessionContext()
 
-    config = None
-    runtime = None
-    limit_bytes = parse_size_to_bytes(memory_limit) if memory_limit else None
-    if limit_bytes:
-        spill_reservation = min(
-            max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
-        )
-        in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
-        config = datafusion.SessionConfig(
-            {
-                "datafusion.execution.sort_spill_reservation_bytes": str(
-                    spill_reservation
-                ),
-                "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
-            }
-        )
-        runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
-
-    ctx = datafusion.SessionContext(config=config, runtime=runtime)
-    if max_tmp_dir_gb:
-        ctx.sql(
-            f"SET datafusion.runtime.max_temp_directory_size = "
-            f"'{_datafusion_temp_size(max_tmp_dir_gb)}'"
-        )
-    if threads is not None:
-        ctx.sql(f"SET datafusion.execution.target_partitions = {threads}")
-    return ctx
+    spill_reservation = min(
+        max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
+    )
+    in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
+    config = datafusion.SessionConfig(
+        {
+            "datafusion.execution.sort_spill_reservation_bytes": str(spill_reservation),
+            "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
+        }
+    )
+    runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
+    return datafusion.SessionContext(config=config, runtime=runtime)
 
 
-def _stream_to_parquet(
-    df,
-    path: Path,
-    target_to_uint64: bool = False,
-    plain_columns: list[str] | None = None,
-    total_rows: int | None = None,
-) -> None:
+def _stream_to_parquet(df, path: Path, target_to_uint64: bool = False) -> None:
     """
     Stream a DataFusion DataFrame into a Parquet file with icebug metadata.
 
@@ -159,40 +103,8 @@ def _stream_to_parquet(
     rather than materialising the whole result, which is the point of the
     DataFusion backend.  Falls back to ``to_arrow_table()`` only for empty
     results (where there is nothing to stream).
-
-    ``plain_columns`` names columns whose values are effectively unique or
-    random per row group (CSR ``target`` neighbour ids, node primary keys).
-    pyarrow's default dictionary encoding writes a dictionary page per row
-    group that can never pay off for such columns (a dictionary of N distinct
-    values costs roughly 2x the plain data), inflating the file; those columns
-    are written with PLAIN encoding while any other (low-cardinality property)
-    columns keep dictionary encoding.
-
-    ``total_rows`` enables a tqdm progress bar over the streamed rows (used
-    when the caller knows the result size up front, e.g. from parquet
-    metadata); when ``None`` no bar is shown.
     """
     writer = None
-    plain = set(plain_columns or ())
-    buf: list[pa.RecordBatch] = []
-    buf_rows = 0
-    bar = (
-        tqdm(total=total_rows, unit="rows", desc=f"Writing {path.name}")
-        if total_rows is not None
-        else None
-    )
-
-    def _flush() -> None:
-        """Write the buffered batches as one row group."""
-        nonlocal buf, buf_rows
-        if not buf:
-            return
-        # row_group_size=None -> min(rows, 1 MiB) per call, i.e. exactly one
-        # row group of _ROWS_PER_ROW_GROUP rows (the tail chunk may be smaller).
-        writer.write_table(pa.Table.from_batches(buf))
-        buf = []
-        buf_rows = 0
-
     for batch in df.execute_stream():
         rb = batch.to_pyarrow()
         if writer is None:
@@ -201,25 +113,13 @@ def _stream_to_parquet(
                 i = schema.get_field_index("target")
                 schema = schema.set(i, pa.field(schema.field(i).name, pa.uint64()))
             schema = schema.with_metadata({"icebug_disk_version": ICEBUG_DISK_VERSION})
-            # Enable dictionary encoding only where it can pay off; a listed
-            # use_dictionary of column names disables it for all others.
-            dict_cols = [c for c in schema.names if c not in plain]
-            writer = pq.ParquetWriter(
-                path, schema, compression=_COMPRESSION, use_dictionary=dict_cols
-            )
+            writer = pq.ParquetWriter(path, schema, compression=_COMPRESSION)
         if target_to_uint64 and "target" in rb.schema.names:
             i = rb.schema.get_field_index("target")
             rb = rb.set_column(
                 i, rb.schema.field(i).name, rb.column(i).cast(pa.uint64())
             )
-        buf.append(rb)
-        buf_rows += rb.num_rows
-        if bar is not None:
-            bar.update(rb.num_rows)
-        if buf_rows >= _ROWS_PER_ROW_GROUP:
-            _flush()
-    if bar is not None:
-        bar.close()
+        writer.write_batch(rb)
     if writer is None:
         table = df.to_arrow_table()
         if target_to_uint64 and "target" in table.schema.names:
@@ -231,7 +131,6 @@ def _stream_to_parquet(
             )
         _write_icebug_parquet(table, path, compression=_COMPRESSION)
         return
-    _flush()
     writer.close()
 
 
@@ -271,9 +170,6 @@ def build_csr_from_arrow_tables(
     to_node_table: pa.Table | None = None,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
-    max_tmp_dir_gb: float | None = None,
-    input_sorted: bool = False,
-    threads: int | None = None,
 ) -> tuple[pa.Table, pa.Table, pa.Table, pa.Table]:
     """
     Build ``(src_out, dst_out, indices, indptr)`` with the DataFusion engine.
@@ -282,12 +178,10 @@ def build_csr_from_arrow_tables(
     (the pure-PyArrow path), but the node sort, endpoint mapping and
     ``(source, target)`` sort run inside DataFusion so *memory_limit* bounds
     the engine's memory pool and spillable operators write to the OS temp dir
-    instead of growing RSS, and *max_tmp_dir_gb* caps the temp directory size.
-    Mirrors :func:`convert_graph` for Parquet pairs, with the vertex/edge
-    tables registered from Arrow rather than Parquet files.  Unless
-    *input_sorted* is set, node tables are ordered by primary key; with
-    *input_sorted* the caller guarantees they are already ordered, so CSR ids
-    are assigned by row position and the sort is skipped.
+    instead of growing RSS.  Mirrors :func:`convert_graph` for Parquet pairs,
+    with the vertex/edge tables registered from Arrow rather than Parquet
+    files.  Node tables are always ordered by primary key (there is no
+    ``input_sorted`` shortcut).
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -312,17 +206,15 @@ def build_csr_from_arrow_tables(
     n_src = len(node_table)
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = _build_context(datafusion, memory_limit, max_tmp_dir_gb, threads)
+    ctx = _build_context(datafusion, memory_limit)
     _register_table(ctx, "vertices", node_table)
     _register_table(ctx, "vertices_dst", to_node_table)
     _register_table(ctx, "edges", rel_table)
 
     def _map_view(table: str, pk: str) -> str:
-        # input_sorted: CSR ids follow input row order, so skip the sort.
-        row_order = "" if input_sorted else f"ORDER BY {_q(pk)}"
         return (
             f"SELECT {_q(pk)} AS original_node_id, "
-            f"CAST(ROW_NUMBER() OVER ({row_order}) AS BIGINT) - 1 "
+            f"CAST(ROW_NUMBER() OVER (ORDER BY {_q(pk)}) AS BIGINT) - 1 "
             f"AS csr_index FROM {table}"
         )
 
@@ -370,12 +262,10 @@ def build_csr_from_arrow_tables(
     ).to_arrow_table()
     indptr = _indptr_from_degrees(deg, n_src)
 
-    # vertices: ordered by primary key (or input row order when input_sorted).
-    src_out = ctx.sql(
-        f"SELECT * FROM vertices{' ORDER BY ' + _q(src_pk) if not input_sorted else ''}"
-    ).to_arrow_table()
+    # vertices: ordered by primary key.
+    src_out = ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(src_pk)}").to_arrow_table()
     dst_out = ctx.sql(
-        f"SELECT * FROM vertices_dst{' ORDER BY ' + _q(dst_pk) if not input_sorted else ''}"
+        f"SELECT * FROM vertices_dst ORDER BY {_q(dst_pk)}"
     ).to_arrow_table()
 
     return src_out, dst_out, indices, indptr
@@ -385,19 +275,12 @@ def convert_graph(
     graph: dict,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
-    max_tmp_dir_gb: float | None = None,
-    input_sorted: bool = False,
-    threads: int | None = None,
 ) -> None:
     """Convert one vertex/edge Parquet pair with the DataFusion SQL engine.
 
     ``memory_limit`` bounds the session's memory pool (size string, percent of
     RAM, or GB number); sorts and window operators spill to disk when the pool
-    is exhausted instead of growing RSS.  ``max_tmp_dir_gb`` caps the temp
-    directory size (``datafusion.runtime.max_temp_directory_size``).
-    ``input_sorted`` skips the node-table sort: CSR ids are then assigned by
-    row position, which is only valid when the vertex parquet is already
-    ordered by primary key.
+    is exhausted instead of growing RSS.
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -415,16 +298,14 @@ def convert_graph(
     prop_cols = [c for c in ef.schema_arrow.names if c not in (src_col, dst_col)]
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = _build_context(datafusion, memory_limit, max_tmp_dir_gb, threads)
+    ctx = _build_context(datafusion, memory_limit)
     ctx.register_parquet("vertices", vertex_path)
     ctx.register_parquet("edges", edge_path)
 
-    # Dense id -> CSR index mapping, ordered by primary key (or input row
-    # order when input_sorted).
-    row_order = "" if input_sorted else f"ORDER BY {_q(pk)}"
+    # Dense id -> CSR index mapping, ordered by primary key.
     df_map = ctx.sql(f"""
         SELECT {_q(pk)} AS original_node_id,
-               CAST(ROW_NUMBER() OVER ({row_order}) AS BIGINT) - 1 AS csr_index
+               CAST(ROW_NUMBER() OVER (ORDER BY {_q(pk)}) AS BIGINT) - 1 AS csr_index
         FROM vertices
         """)
     ctx.register_view("src_map", df_map)
@@ -465,8 +346,6 @@ def convert_graph(
         ctx.sql(idx_sql),
         out_dir / f"indices_{csr_rel_name(name)}.parquet",
         target_to_uint64=True,
-        plain_columns=["target"],
-        total_rows=ef.metadata.num_rows * (2 if add_reverse_edges else 1),
     )
 
     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.
@@ -477,12 +356,8 @@ def convert_graph(
 
     # vertices: copy through (already sorted by primary key) and write outputs.
     _stream_to_parquet(
-        ctx.sql(
-            f"SELECT * FROM vertices{' ORDER BY ' + _q(pk) if not input_sorted else ''}"
-        ),
+        ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(pk)}"),
         out_dir / f"nodes_{name}.parquet",
-        plain_columns=[pk],
-        total_rows=n_nodes,
     )
     _write_icebug_parquet(
         indptr,

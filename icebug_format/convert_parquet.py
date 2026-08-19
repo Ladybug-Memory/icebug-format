@@ -374,6 +374,7 @@ def convert_parquet_dir_to_csr(
     memory_limit: str | None = None,
     max_tmp_dir_gb: float | None = None,
     input_sorted: bool = False,
+    threads: int | None = None,
     storage: str | None = None,
 ) -> list[dict]:
     """
@@ -397,6 +398,10 @@ def convert_parquet_dir_to_csr(
         input_sorted: If ``True``, the caller guarantees the vertex parquet
             files are already sorted by primary key, so the sort step is
             skipped and CSR ids are assigned by row position (all backends).
+        threads: Worker thread count for the SQL backends: DuckDB's
+            ``threads`` setting, DataFusion's
+            ``datafusion.execution.target_partitions``.  Ignored by the
+            ``pyarrow`` backend (no SQL engine).
         storage: Storage path recorded in ``schema.cypher``.
 
     Returns:
@@ -444,6 +449,7 @@ def convert_parquet_dir_to_csr(
             memory_limit=memory_limit,
             max_tmp_dir_gb=max_tmp_dir_gb,
             input_sorted=input_sorted,
+            threads=threads,
         )
         elapsed = time.perf_counter() - start
         (out_dir / "schema.cypher").write_text(

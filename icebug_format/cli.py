@@ -169,6 +169,13 @@ def set_max_temp_dir_size(con, max_tmp_dir_gb: float | None) -> None:
     con.execute(f"PRAGMA max_temp_directory_size='{max_tmp_dir_gb:g}GiB'")
 
 
+def set_threads(con, threads: int | None) -> None:
+    """Apply DuckDB's worker thread count (threads)."""
+    if threads is None:
+        return
+    con.execute("SET threads = ?", [threads])
+
+
 def step_progress(desc: str):
     """Return a tqdm elapsed-mode bar for one-shot SQL steps.
 
@@ -439,6 +446,7 @@ def create_csr_graph_to_duckdb(
     storage_path: str | None = None,
     memory_limit: str = "80%",
     max_tmp_dir_gb: float | None = None,
+    threads: int | None = None,
 ) -> None:
     """
     Create CSR graph data and save to DuckDB using optimized SQL approach.
@@ -455,6 +463,7 @@ def create_csr_graph_to_duckdb(
         storage_path: Storage path for schema.cypher (default: output_db without .duckdb + csr_table_name)
         memory_limit: DuckDB memory limit setting
         max_tmp_dir_gb: DuckDB max_temp_directory_size cap in GiB (spill disk)
+        threads: DuckDB worker thread count
     """
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
@@ -463,6 +472,7 @@ def create_csr_graph_to_duckdb(
     con = duckdb.connect(output_db_path)
     set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
+    set_threads(con, threads)
 
     # Drop all existing tables to recreate from scratch
     result = con.execute("SHOW TABLES").fetchall()
@@ -852,6 +862,13 @@ def main():
         "the sort step is skipped and CSR ids are assigned by row position "
         "(--source-dir only; supported by all backends)",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Number of worker threads for the SQL backends: DuckDB's threads "
+        "setting and DataFusion's datafusion.execution.target_partitions.",
+    )
 
     args = parser.parse_args()
 
@@ -872,6 +889,7 @@ def main():
             else "Max temp dir size: unlimited"
         )
         print(f"Input sorted: {args.input_sorted}")
+        print(f"Threads: {args.threads}")
 
         output_dir = args.output_dir or str(
             Path(args.source_dir).parent / f"{Path(args.source_dir).name}-csr"
@@ -887,6 +905,7 @@ def main():
             memory_limit=args.memory_limit,
             max_tmp_dir_gb=args.max_tmp_dir_gb,
             input_sorted=args.input_sorted,
+            threads=args.threads,
             storage=storage_path,
         )
         for r in results:
@@ -976,6 +995,7 @@ def main():
         storage_path=storage_path,
         memory_limit=args.memory_limit,
         max_tmp_dir_gb=args.max_tmp_dir_gb,
+        threads=args.threads,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
