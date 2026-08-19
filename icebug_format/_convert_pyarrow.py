@@ -26,6 +26,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
 from icebug_format.convert_parquet import (
     _build_indptr,
@@ -204,17 +205,28 @@ def _read_mapped_edges(
         )
 
     batches = []
-    for rb in epf.iter_batches(
-        batch_size=_BATCH_SIZE,
-        columns=[src_col, dst_col, *prop_cols],
-    ):
-        s, t, valid = _map_batch(
-            rb, plan, plan, ids_sorted, ids_sorted, n_nodes, n_nodes, src_col, dst_col
-        )
-        cols = {"csr_source": s, "csr_target": t}
-        for c in prop_cols:
-            cols[c] = rb[c].filter(valid)
-        batches.append(pa.table(cols))
+    total = epf.metadata.num_rows
+    with tqdm(total=total, unit="edges", desc="Mapping edges") as bar:
+        for rb in epf.iter_batches(
+            batch_size=_BATCH_SIZE,
+            columns=[src_col, dst_col, *prop_cols],
+        ):
+            s, t, valid = _map_batch(
+                rb,
+                plan,
+                plan,
+                ids_sorted,
+                ids_sorted,
+                n_nodes,
+                n_nodes,
+                src_col,
+                dst_col,
+            )
+            cols = {"csr_source": s, "csr_target": t}
+            for c in prop_cols:
+                cols[c] = rb[c].filter(valid)
+            batches.append(pa.table(cols))
+            bar.update(rb.num_rows)
 
     if not batches:
         return _empty_mapped(

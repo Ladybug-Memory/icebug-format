@@ -29,6 +29,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
 from icebug_format.convert_parquet import (
     ICEBUG_DISK_VERSION,
@@ -141,6 +142,7 @@ def _stream_to_parquet(
     path: Path,
     target_to_uint64: bool = False,
     plain_columns: list[str] | None = None,
+    total_rows: int | None = None,
 ) -> None:
     """
     Stream a DataFusion DataFrame into a Parquet file with icebug metadata.
@@ -157,11 +159,20 @@ def _stream_to_parquet(
     values costs roughly 2x the plain data), inflating the file; those columns
     are written with PLAIN encoding while any other (low-cardinality property)
     columns keep dictionary encoding.
+
+    ``total_rows`` enables a tqdm progress bar over the streamed rows (used
+    when the caller knows the result size up front, e.g. from parquet
+    metadata); when ``None`` no bar is shown.
     """
     writer = None
     plain = set(plain_columns or ())
     buf: list[pa.RecordBatch] = []
     buf_rows = 0
+    bar = (
+        tqdm(total=total_rows, unit="rows", desc=f"Writing {path.name}")
+        if total_rows is not None
+        else None
+    )
 
     def _flush() -> None:
         """Write the buffered batches as one row group."""
@@ -195,8 +206,12 @@ def _stream_to_parquet(
             )
         buf.append(rb)
         buf_rows += rb.num_rows
+        if bar is not None:
+            bar.update(rb.num_rows)
         if buf_rows >= _ROWS_PER_ROW_GROUP:
             _flush()
+    if bar is not None:
+        bar.close()
     if writer is None:
         table = df.to_arrow_table()
         if target_to_uint64 and "target" in table.schema.names:
@@ -441,6 +456,7 @@ def convert_graph(
         out_dir / f"indices_{csr_rel_name(name)}.parquet",
         target_to_uint64=True,
         plain_columns=["target"],
+        total_rows=ef.metadata.num_rows * (2 if add_reverse_edges else 1),
     )
 
     # indptr: degrees from a streaming GROUP BY, then histogram + prefix sum.
@@ -456,6 +472,7 @@ def convert_graph(
         ),
         out_dir / f"nodes_{name}.parquet",
         plain_columns=[pk],
+        total_rows=n_nodes,
     )
     _write_icebug_parquet(
         indptr,
