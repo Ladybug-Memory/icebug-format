@@ -72,8 +72,27 @@ def _q(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _build_context(datafusion, memory_limit: str | None):
-    """Return a ``SessionContext`` that honors *memory_limit* as a spill pool.
+def _datafusion_temp_size(gb: float) -> str:
+    """Format a GB number as a DataFusion ``max_temp_directory_size`` value.
+
+    The ``SET datafusion.runtime.max_temp_directory_size`` path only accepts
+    integer sizes with ``K``/``M``/``G`` units, so the byte count is expressed
+    in the largest integral binary unit (e.g. 10 -> ``'10G'``, 1.5 ->
+    ``'1536M'``).
+    """
+    size = max(1, int(round(gb * (1 << 30))))
+    if size % (1 << 30) == 0:
+        return f"{size >> 30}G"
+    if size % (1 << 20) == 0:
+        return f"{size >> 20}M"
+    return f"{size >> 10}K"
+
+
+def _build_context(
+    datafusion, memory_limit: str | None, max_tmp_dir_gb: float | None = None
+):
+    """Return a ``SessionContext`` that honors *memory_limit* as a spill pool
+    and *max_tmp_dir_gb* as the temp directory size cap.
 
     Without a limit (or with an unparseable/non-positive one) a default
     ``SessionContext`` is returned.  With a limit, the session's runtime uses
@@ -82,26 +101,39 @@ def _build_context(datafusion, memory_limit: str | None):
     not leave the headroom ``SortPreservingMerge`` needs to allocate its
     in-memory merge buffers) and SortExec is tuned to spill through
     ``datafusion.execution.sort_spill_reservation_bytes`` and
-    ``datafusion.execution.sort_in_place_threshold_bytes``.
+    ``datafusion.execution.sort_in_place_threshold_bytes``.  With a temp dir
+    size, ``datafusion.runtime.max_temp_directory_size`` caps how much spill
+    data may accumulate on disk (the DataFusion analogue of DuckDB's
+    ``max_temp_directory_size`` PRAGMA).
     """
-    if not memory_limit:
-        return datafusion.SessionContext()
-    limit_bytes = parse_size_to_bytes(memory_limit)
-    if not limit_bytes:
+    if not memory_limit and not max_tmp_dir_gb:
         return datafusion.SessionContext()
 
-    spill_reservation = min(
-        max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
-    )
-    in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
-    config = datafusion.SessionConfig(
-        {
-            "datafusion.execution.sort_spill_reservation_bytes": str(spill_reservation),
-            "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
-        }
-    )
-    runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
-    return datafusion.SessionContext(config=config, runtime=runtime)
+    config = None
+    runtime = None
+    limit_bytes = parse_size_to_bytes(memory_limit) if memory_limit else None
+    if limit_bytes:
+        spill_reservation = min(
+            max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
+        )
+        in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
+        config = datafusion.SessionConfig(
+            {
+                "datafusion.execution.sort_spill_reservation_bytes": str(
+                    spill_reservation
+                ),
+                "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
+            }
+        )
+        runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
+
+    ctx = datafusion.SessionContext(config=config, runtime=runtime)
+    if max_tmp_dir_gb:
+        ctx.sql(
+            f"SET datafusion.runtime.max_temp_directory_size = "
+            f"'{_datafusion_temp_size(max_tmp_dir_gb)}'"
+        )
+    return ctx
 
 
 def _stream_to_parquet(
@@ -216,6 +248,8 @@ def build_csr_from_arrow_tables(
     to_node_table: pa.Table | None = None,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
 ) -> tuple[pa.Table, pa.Table, pa.Table, pa.Table]:
     """
     Build ``(src_out, dst_out, indices, indptr)`` with the DataFusion engine.
@@ -224,10 +258,12 @@ def build_csr_from_arrow_tables(
     (the pure-PyArrow path), but the node sort, endpoint mapping and
     ``(source, target)`` sort run inside DataFusion so *memory_limit* bounds
     the engine's memory pool and spillable operators write to the OS temp dir
-    instead of growing RSS.  Mirrors :func:`convert_graph` for Parquet pairs,
-    with the vertex/edge tables registered from Arrow rather than Parquet
-    files.  Node tables are always ordered by primary key (there is no
-    ``input_sorted`` shortcut).
+    instead of growing RSS, and *max_tmp_dir_gb* caps the temp directory size.
+    Mirrors :func:`convert_graph` for Parquet pairs, with the vertex/edge
+    tables registered from Arrow rather than Parquet files.  Unless
+    *input_sorted* is set, node tables are ordered by primary key; with
+    *input_sorted* the caller guarantees they are already ordered, so CSR ids
+    are assigned by row position and the sort is skipped.
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -252,15 +288,17 @@ def build_csr_from_arrow_tables(
     n_src = len(node_table)
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = _build_context(datafusion, memory_limit)
+    ctx = _build_context(datafusion, memory_limit, max_tmp_dir_gb)
     _register_table(ctx, "vertices", node_table)
     _register_table(ctx, "vertices_dst", to_node_table)
     _register_table(ctx, "edges", rel_table)
 
     def _map_view(table: str, pk: str) -> str:
+        # input_sorted: CSR ids follow input row order, so skip the sort.
+        row_order = "" if input_sorted else f"ORDER BY {_q(pk)}"
         return (
             f"SELECT {_q(pk)} AS original_node_id, "
-            f"CAST(ROW_NUMBER() OVER (ORDER BY {_q(pk)}) AS BIGINT) - 1 "
+            f"CAST(ROW_NUMBER() OVER ({row_order}) AS BIGINT) - 1 "
             f"AS csr_index FROM {table}"
         )
 
@@ -308,10 +346,12 @@ def build_csr_from_arrow_tables(
     ).to_arrow_table()
     indptr = _indptr_from_degrees(deg, n_src)
 
-    # vertices: ordered by primary key.
-    src_out = ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(src_pk)}").to_arrow_table()
+    # vertices: ordered by primary key (or input row order when input_sorted).
+    src_out = ctx.sql(
+        f"SELECT * FROM vertices{' ORDER BY ' + _q(src_pk) if not input_sorted else ''}"
+    ).to_arrow_table()
     dst_out = ctx.sql(
-        f"SELECT * FROM vertices_dst ORDER BY {_q(dst_pk)}"
+        f"SELECT * FROM vertices_dst{' ORDER BY ' + _q(dst_pk) if not input_sorted else ''}"
     ).to_arrow_table()
 
     return src_out, dst_out, indices, indptr
@@ -321,12 +361,18 @@ def convert_graph(
     graph: dict,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
 ) -> None:
     """Convert one vertex/edge Parquet pair with the DataFusion SQL engine.
 
     ``memory_limit`` bounds the session's memory pool (size string, percent of
     RAM, or GB number); sorts and window operators spill to disk when the pool
-    is exhausted instead of growing RSS.
+    is exhausted instead of growing RSS.  ``max_tmp_dir_gb`` caps the temp
+    directory size (``datafusion.runtime.max_temp_directory_size``).
+    ``input_sorted`` skips the node-table sort: CSR ids are then assigned by
+    row position, which is only valid when the vertex parquet is already
+    ordered by primary key.
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -344,14 +390,16 @@ def convert_graph(
     prop_cols = [c for c in ef.schema_arrow.names if c not in (src_col, dst_col)]
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = _build_context(datafusion, memory_limit)
+    ctx = _build_context(datafusion, memory_limit, max_tmp_dir_gb)
     ctx.register_parquet("vertices", vertex_path)
     ctx.register_parquet("edges", edge_path)
 
-    # Dense id -> CSR index mapping, ordered by primary key.
+    # Dense id -> CSR index mapping, ordered by primary key (or input row
+    # order when input_sorted).
+    row_order = "" if input_sorted else f"ORDER BY {_q(pk)}"
     df_map = ctx.sql(f"""
         SELECT {_q(pk)} AS original_node_id,
-               CAST(ROW_NUMBER() OVER (ORDER BY {_q(pk)}) AS BIGINT) - 1 AS csr_index
+               CAST(ROW_NUMBER() OVER ({row_order}) AS BIGINT) - 1 AS csr_index
         FROM vertices
         """)
     ctx.register_view("src_map", df_map)
@@ -403,7 +451,9 @@ def convert_graph(
 
     # vertices: copy through (already sorted by primary key) and write outputs.
     _stream_to_parquet(
-        ctx.sql(f"SELECT * FROM vertices ORDER BY {_q(pk)}"),
+        ctx.sql(
+            f"SELECT * FROM vertices{' ORDER BY ' + _q(pk) if not input_sorted else ''}"
+        ),
         out_dir / f"nodes_{name}.parquet",
         plain_columns=[pk],
     )

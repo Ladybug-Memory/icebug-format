@@ -315,20 +315,27 @@ def convert_graph(
     graph: dict,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
 ) -> None:
     """
     Convert one vertex/edge Parquet pair with the pure-PyArrow pipeline.
 
-    ``memory_limit`` is accepted for interface compatibility with the SQL
-    backends but is not used (pyarrow manages its own memory).
+    ``memory_limit`` and ``max_tmp_dir_gb`` are accepted for interface
+    compatibility with the SQL backends but are not used (pyarrow manages its
+    own memory).  ``input_sorted`` skips the node-table sort: CSR ids are then
+    assigned by row position, which is only valid when the vertex parquet is
+    already ordered by primary key.
     """
     name = graph["name"]
     out_dir = Path(graph["output_dir"])
 
-    # --- vertices: sort by primary key; CSR index = row position -----------
+    # --- vertices: CSR index = row position; sort by primary key unless -----
+    # --- the caller guarantees the input is already sorted -------------------
     vtable = pq.read_table(graph["vertex"])
     pk = vtable.schema.names[0]
-    vtable = vtable.take(pc.sort_indices(vtable.column(pk)))
+    if not input_sorted:
+        vtable = vtable.take(pc.sort_indices(vtable.column(pk)))
     ids_sorted = vtable.column(pk)
     n_nodes = len(vtable)
 

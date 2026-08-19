@@ -160,6 +160,13 @@ def set_memory_limit(con, memory_limit: str) -> None:
     con.execute("SET memory_limit = ?", [memory_limit])
 
 
+def set_max_temp_dir_size(con, max_tmp_dir_gb: float | None) -> None:
+    """Apply DuckDB's temp/spill directory size cap (max_temp_directory_size)."""
+    if max_tmp_dir_gb is None:
+        return
+    con.execute(f"PRAGMA max_temp_directory_size='{max_tmp_dir_gb:g}GiB'")
+
+
 def duckdb_type_to_cypher_type(duckdb_type: str) -> str:
     """Convert DuckDB column type to Cypher/Ladybug type."""
     duckdb_type = duckdb_type.upper()
@@ -419,6 +426,7 @@ def create_csr_graph_to_duckdb(
     schema_path: str | None = None,
     storage_path: str | None = None,
     memory_limit: str = "80%",
+    max_tmp_dir_gb: float | None = None,
 ) -> None:
     """
     Create CSR graph data and save to DuckDB using optimized SQL approach.
@@ -434,6 +442,7 @@ def create_csr_graph_to_duckdb(
         schema_path: Path to schema.cypher for edge relationship info
         storage_path: Storage path for schema.cypher (default: output_db without .duckdb + csr_table_name)
         memory_limit: DuckDB memory limit setting
+        max_tmp_dir_gb: DuckDB max_temp_directory_size cap in GiB (spill disk)
     """
     print("\n=== Creating CSR Graph Data (Optimized SQL Approach) ===")
 
@@ -441,6 +450,7 @@ def create_csr_graph_to_duckdb(
     duckdb = _require_duckdb("the 'convert' feature (CSR graph conversion)")
     con = duckdb.connect(output_db_path)
     set_memory_limit(con, memory_limit)
+    set_max_temp_dir_size(con, max_tmp_dir_gb)
 
     # Drop all existing tables to recreate from scratch
     result = con.execute("SHOW TABLES").fetchall()
@@ -813,6 +823,21 @@ def main():
         default=default_memory_limit(),
         help="DuckDB memory limit as a size string or GB number (default: 80%% of RAM)",
     )
+    parser.add_argument(
+        "--max-tmp-dir-gb",
+        type=float,
+        default=None,
+        help="Maximum size of the temp/spill directory in GB (e.g. 10 -> '10GiB'). "
+        "Sets DuckDB's max_temp_directory_size (PRAGMA) and DataFusion's "
+        "datafusion.runtime.max_temp_directory_size.",
+    )
+    parser.add_argument(
+        "--input-sorted",
+        action="store_true",
+        help="Input vertex/edge parquet files are already sorted by primary key, so "
+        "the sort step is skipped and CSR ids are assigned by row position "
+        "(--source-dir only; supported by all backends)",
+    )
 
     args = parser.parse_args()
 
@@ -827,6 +852,12 @@ def main():
         print(f"Backend: {args.backend}")
         print(f"Add reverse edges: {args.add_reverse_edges}")
         print(f"DuckDB/DataFusion memory limit: {args.memory_limit}")
+        print(
+            f"Max temp dir size: {args.max_tmp_dir_gb}GiB"
+            if args.max_tmp_dir_gb
+            else "Max temp dir size: unlimited"
+        )
+        print(f"Input sorted: {args.input_sorted}")
 
         output_dir = args.output_dir or str(
             Path(args.source_dir).parent / f"{Path(args.source_dir).name}-csr"
@@ -840,6 +871,8 @@ def main():
             backend=args.backend,
             add_reverse_edges=args.add_reverse_edges,
             memory_limit=args.memory_limit,
+            max_tmp_dir_gb=args.max_tmp_dir_gb,
+            input_sorted=args.input_sorted,
             storage=storage_path,
         )
         for r in results:
@@ -928,6 +961,7 @@ def main():
         schema_path=args.schema,
         storage_path=storage_path,
         memory_limit=args.memory_limit,
+        max_tmp_dir_gb=args.max_tmp_dir_gb,
     )
 
     print("\n=== Conversion Completed Successfully! ===")
