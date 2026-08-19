@@ -34,6 +34,7 @@ def convert_graph(
     memory_limit: str | None = None,
     max_tmp_dir_gb: float | None = None,
     input_sorted: bool = False,
+    threads: int | None = None,
 ) -> None:
     """Convert one vertex/edge Parquet pair with the DuckDB SQL engine."""
     from icebug_format._duckdb import require_duckdb
@@ -41,6 +42,7 @@ def convert_graph(
         _write_parquet_with_icebug_metadata,
         set_max_temp_dir_size,
         set_memory_limit,
+        set_threads,
         step_progress,
     )
 
@@ -56,6 +58,7 @@ def convert_graph(
     if memory_limit:
         set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
+    set_threads(con, threads)
     try:
         # input_sorted: the caller guarantees the vertex parquet is already
         # ordered by primary key, so skip the sort; CSR ids = row position.
@@ -172,6 +175,7 @@ def build_csr_from_arrow_tables(
     memory_limit: str | None = None,
     max_tmp_dir_gb: float | None = None,
     input_sorted: bool = False,
+    threads: int | None = None,
 ) -> tuple[pa.Table, pa.Table, pa.Table, pa.Table]:
     """
     Build ``(src_out, dst_out, indices, indptr)`` with the DuckDB engine.
@@ -181,7 +185,8 @@ def build_csr_from_arrow_tables(
     ``(source, target)`` sort run inside DuckDB with the vertex/edge tables
     registered from Arrow, so *memory_limit* bounds DuckDB's buffer pool and
     the external sort spills to disk instead of growing RSS, and
-    *max_tmp_dir_gb* caps the spill directory size.  Mirrors
+    *max_tmp_dir_gb* caps the spill directory size.  *threads* sets DuckDB's
+    worker thread count.  Mirrors
     :func:`convert_graph` for Parquet pairs, with the tables registered from
     Arrow rather than Parquet files.  Unless *input_sorted* is set, node
     tables are ordered by primary key; with *input_sorted* the caller
@@ -189,7 +194,11 @@ def build_csr_from_arrow_tables(
     position and the sort is skipped.
     """
     from icebug_format._duckdb import require_duckdb
-    from icebug_format.cli import set_max_temp_dir_size, set_memory_limit
+    from icebug_format.cli import (
+        set_max_temp_dir_size,
+        set_memory_limit,
+        set_threads,
+    )
 
     if add_reverse_edges and to_node_table is not None:
         raise ValueError(
@@ -216,6 +225,7 @@ def build_csr_from_arrow_tables(
     if memory_limit:
         set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
+    set_threads(con, threads)
     try:
         con.register("vertices", node_table)
         con.register("vertices_dst", to_node_table)
