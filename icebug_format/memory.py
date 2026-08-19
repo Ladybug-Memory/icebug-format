@@ -52,6 +52,7 @@ class IcebugMemGraph:
         input_sorted: bool = False,
         backend: str = "pyarrow",
         memory_limit: str | None = None,
+        max_tmp_dir_gb: float | None = None,
     ) -> "IcebugMemGraph":
         """
         Convert node and relationship Arrow tables to an IcebugMemGraph.
@@ -90,9 +91,8 @@ class IcebugMemGraph:
                                    so the sort step is skipped and CSR ids are
                                    assigned by input row position (faster, but
                                    the mapping is only valid for pre-sorted
-                                   input).  Ignored by the ``"datafusion"``
-                                   backend, which always sorts by primary key.
-                                   Defaults to ``False``.
+                                   input).  Honored by all backends; defaults
+                                   to ``False``.
             backend:               Conversion engine: ``"pyarrow"`` (default;
                                    pure in-memory pipeline), ``"duckdb"``
                                    (requires the ``convert`` extra) or
@@ -108,6 +108,12 @@ class IcebugMemGraph:
                                    number); sorts spill to disk.  Only honored
                                    by the ``"duckdb"`` and ``"datafusion"``
                                    backends.
+            max_tmp_dir_gb:        Cap on the temp/spill directory size in GiB
+                                   (DuckDB's ``max_temp_directory_size``
+                                   PRAGMA, DataFusion's
+                                   ``datafusion.runtime.max_temp_directory_size``).
+                                   Only honored by the ``"duckdb"`` and
+                                   ``"datafusion"`` backends.
 
         Returns:
             IcebugMemGraph where *src* and *dest* are the node tables in CSR
@@ -145,6 +151,8 @@ class IcebugMemGraph:
                 to_node_table=to_node_arrow_table,
                 add_reverse_edges=add_reverse_edges,
                 memory_limit=memory_limit,
+                max_tmp_dir_gb=max_tmp_dir_gb,
+                input_sorted=input_sorted,
             )
         elif backend == "duckdb":
             from icebug_format._convert_duckdb import (
@@ -157,6 +165,8 @@ class IcebugMemGraph:
                 to_node_table=to_node_arrow_table,
                 add_reverse_edges=add_reverse_edges,
                 memory_limit=memory_limit,
+                max_tmp_dir_gb=max_tmp_dir_gb,
+                input_sorted=input_sorted,
             )
         else:
             src, dest, indices, indptr = build_csr_from_tables(

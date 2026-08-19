@@ -32,10 +32,16 @@ def convert_graph(
     graph: dict,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
 ) -> None:
     """Convert one vertex/edge Parquet pair with the DuckDB SQL engine."""
     from icebug_format._duckdb import require_duckdb
-    from icebug_format.cli import _write_parquet_with_icebug_metadata, set_memory_limit
+    from icebug_format.cli import (
+        _write_parquet_with_icebug_metadata,
+        set_max_temp_dir_size,
+        set_memory_limit,
+    )
 
     name = graph["name"]
     out_dir = Path(graph["output_dir"])
@@ -48,9 +54,13 @@ def convert_graph(
     con = duckdb.connect()
     if memory_limit:
         set_memory_limit(con, memory_limit)
+    set_max_temp_dir_size(con, max_tmp_dir_gb)
     try:
+        # input_sorted: the caller guarantees the vertex parquet is already
+        # ordered by primary key, so skip the sort; CSR ids = row position.
+        order_by = "" if input_sorted else f" ORDER BY {_q(pk)}"
         con.execute(
-            f"CREATE TABLE vertices AS SELECT * FROM read_parquet(?) ORDER BY {_q(pk)}",
+            f"CREATE TABLE vertices AS SELECT * FROM read_parquet(?){order_by}",
             [vertex_path],
         )
         con.execute("CREATE TABLE edges AS SELECT * FROM read_parquet(?)", [edge_path])
@@ -60,10 +70,12 @@ def convert_graph(
         src_col, dst_col = resolve_rel_column_names(edge_cols)
         prop_cols = [c for c in edge_cols if c not in (src_col, dst_col)]
 
-        # Dense id -> CSR index mapping, ordered by primary key.
+        # Dense id -> CSR index mapping, ordered by primary key (or input row
+        # order when input_sorted).
+        row_order = "" if input_sorted else f"ORDER BY {_q(pk)}"
         con.execute(f"""
             CREATE TABLE src_map AS
-            SELECT row_number() OVER (ORDER BY {_q(pk)}) - 1 AS csr_index,
+            SELECT row_number() OVER ({row_order}) - 1 AS csr_index,
                    {_q(pk)} AS original_node_id
             FROM vertices
             """)
@@ -155,6 +167,8 @@ def build_csr_from_arrow_tables(
     to_node_table: pa.Table | None = None,
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
 ) -> tuple[pa.Table, pa.Table, pa.Table, pa.Table]:
     """
     Build ``(src_out, dst_out, indices, indptr)`` with the DuckDB engine.
@@ -163,13 +177,16 @@ def build_csr_from_arrow_tables(
     (the pure-PyArrow path), but the node sort, endpoint mapping and
     ``(source, target)`` sort run inside DuckDB with the vertex/edge tables
     registered from Arrow, so *memory_limit* bounds DuckDB's buffer pool and
-    the external sort spills to disk instead of growing RSS.  Mirrors
+    the external sort spills to disk instead of growing RSS, and
+    *max_tmp_dir_gb* caps the spill directory size.  Mirrors
     :func:`convert_graph` for Parquet pairs, with the tables registered from
-    Arrow rather than Parquet files.  Node tables are always ordered by primary
-    key (there is no ``input_sorted`` shortcut).
+    Arrow rather than Parquet files.  Unless *input_sorted* is set, node
+    tables are ordered by primary key; with *input_sorted* the caller
+    guarantees they are already ordered, so CSR ids are assigned by row
+    position and the sort is skipped.
     """
     from icebug_format._duckdb import require_duckdb
-    from icebug_format.cli import set_memory_limit
+    from icebug_format.cli import set_max_temp_dir_size, set_memory_limit
 
     if add_reverse_edges and to_node_table is not None:
         raise ValueError(
@@ -195,15 +212,18 @@ def build_csr_from_arrow_tables(
     con = duckdb.connect()
     if memory_limit:
         set_memory_limit(con, memory_limit)
+    set_max_temp_dir_size(con, max_tmp_dir_gb)
     try:
         con.register("vertices", node_table)
         con.register("vertices_dst", to_node_table)
         con.register("edges", rel_table)
 
-        # Dense id -> CSR index mapping, ordered by primary key.
+        # Dense id -> CSR index mapping, ordered by primary key (or input row
+        # order when input_sorted).
+        src_row_order = "" if input_sorted else f"ORDER BY {_q(src_pk)}"
         con.execute(f"""
             CREATE TABLE src_map AS
-            SELECT row_number() OVER (ORDER BY {_q(src_pk)}) - 1 AS csr_index,
+            SELECT row_number() OVER ({src_row_order}) - 1 AS csr_index,
                    {_q(src_pk)} AS original_node_id
             FROM vertices
             """)
@@ -211,9 +231,10 @@ def build_csr_from_arrow_tables(
             dst_map = "src_map"
         else:
             dst_map = "dst_map"
+            dst_row_order = "" if input_sorted else f"ORDER BY {_q(dst_pk)}"
             con.execute(f"""
                 CREATE TABLE dst_map AS
-                SELECT row_number() OVER (ORDER BY {_q(dst_pk)}) - 1 AS csr_index,
+                SELECT row_number() OVER ({dst_row_order}) - 1 AS csr_index,
                        {_q(dst_pk)} AS original_node_id
                 FROM vertices_dst
                 """)
@@ -286,10 +307,10 @@ def build_csr_from_arrow_tables(
             """)
 
         src_out = con.execute(
-            f"SELECT * FROM vertices ORDER BY {_q(src_pk)}"
+            f"SELECT * FROM vertices{' ORDER BY ' + _q(src_pk) if not input_sorted else ''}"
         ).to_arrow_table()
         dst_out = con.execute(
-            f"SELECT * FROM vertices_dst ORDER BY {_q(dst_pk)}"
+            f"SELECT * FROM vertices_dst{' ORDER BY ' + _q(dst_pk) if not input_sorted else ''}"
         ).to_arrow_table()
         indices = con.execute("SELECT * FROM indices").to_arrow_table()
         indptr = con.execute("SELECT * FROM indptr").to_arrow_table()

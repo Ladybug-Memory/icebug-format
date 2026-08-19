@@ -429,17 +429,18 @@ def test_sql_backends_heterogeneous_nodes(backend):
 
 
 @pytest.mark.parametrize("backend", SQL_BACKENDS)
-def test_sql_backends_ignore_input_sorted(backend):
-    """The SQL backends always sort by primary key."""
-    nodes = pa.table({"id": pa.array([30, 10, 20], type=pa.int64())})
+def test_sql_backends_honor_input_sorted(backend):
+    """The SQL backends assign CSR ids by row position when input_sorted."""
+    nodes = _nodes(10, 20, 30)
     rels = _rels([20], [30])
 
     g = IcebugMemGraph.from_arrow_tables(
         nodes, rels, backend=backend, input_sorted=True
     )
-    ref = IcebugMemGraph.from_arrow_tables(nodes, rels)
+    ref = IcebugMemGraph.from_arrow_tables(nodes, rels, input_sorted=True)
 
-    assert g.src["id"].to_pylist() == [10, 20, 30]
+    assert g.src.equals(nodes)  # passed through unchanged
+    assert g.indices["target"].to_pylist() == [2]  # 20=1 -> 30=2
     _assert_same_csr(g, ref)
 
 

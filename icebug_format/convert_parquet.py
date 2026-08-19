@@ -372,6 +372,8 @@ def convert_parquet_dir_to_csr(
     backend: str = "auto",
     add_reverse_edges: bool = False,
     memory_limit: str | None = None,
+    max_tmp_dir_gb: float | None = None,
+    input_sorted: bool = False,
     storage: str | None = None,
 ) -> list[dict]:
     """
@@ -388,6 +390,13 @@ def convert_parquet_dir_to_csr(
         backend: One of ``auto``, ``pyarrow``, ``duckdb``, ``datafusion``.
         add_reverse_edges: Emit symmetric adjacency by adding reverse edges.
         memory_limit: DuckDB/DataFusion memory limit (size string or GB number).
+        max_tmp_dir_gb: Cap on the temp/spill directory size in GiB: DuckDB's
+            ``max_temp_directory_size`` PRAGMA, DataFusion's
+            ``datafusion.runtime.max_temp_directory_size``.  Ignored by the
+            ``pyarrow`` backend (no SQL engine).
+        input_sorted: If ``True``, the caller guarantees the vertex parquet
+            files are already sorted by primary key, so the sort step is
+            skipped and CSR ids are assigned by row position (all backends).
         storage: Storage path recorded in ``schema.cypher``.
 
     Returns:
@@ -429,7 +438,13 @@ def convert_parquet_dir_to_csr(
         out_dir.mkdir(parents=True, exist_ok=True)
         ctx = {**g, "output_dir": out_dir, "storage": storage_path}
         start = time.perf_counter()
-        convert(ctx, add_reverse_edges=add_reverse_edges, memory_limit=memory_limit)
+        convert(
+            ctx,
+            add_reverse_edges=add_reverse_edges,
+            memory_limit=memory_limit,
+            max_tmp_dir_gb=max_tmp_dir_gb,
+            input_sorted=input_sorted,
+        )
         elapsed = time.perf_counter() - start
         (out_dir / "schema.cypher").write_text(
             _generate_schema_cypher(g["name"], out_dir, storage_path)
