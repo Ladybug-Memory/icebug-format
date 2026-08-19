@@ -21,7 +21,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from icebug_format.convert_parquet import csr_rel_name, resolve_rel_column_names
+from icebug_format.convert_parquet import (
+    ICEBUG_DISK_VERSION,
+    csr_rel_name,
+    resolve_rel_column_names,
+)
 
 
 def _q(name: str) -> str:
@@ -52,6 +56,10 @@ def convert_graph(
     edge_path = str(graph["edge"])
 
     pk = pq.ParquetFile(vertex_path).schema_arrow.names[0]
+    ef = pq.ParquetFile(edge_path)
+    edge_cols = ef.schema_arrow.names
+    src_col, dst_col = resolve_rel_column_names(edge_cols)
+    prop_cols = [c for c in edge_cols if c not in (src_col, dst_col)]
 
     duckdb = require_duckdb("the 'convert' feature (vertex/edge Parquet conversion)")
     con = duckdb.connect()
@@ -59,6 +67,10 @@ def convert_graph(
         set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
     set_threads(con, threads)
+    # Disable insertion-order preservation: saves memory/disk during the
+    # external sort of large edge sets (the sorted stream is written straight
+    # to Parquet via COPY, so no insertion order needs to be kept).
+    con.execute("SET preserve_insertion_order = false")
     try:
         # input_sorted: the caller guarantees the vertex parquet is already
         # ordered by primary key, so skip the sort; CSR ids = row position.
@@ -67,12 +79,7 @@ def convert_graph(
             f"CREATE TABLE vertices AS SELECT * FROM read_parquet(?){order_by}",
             [vertex_path],
         )
-        con.execute("CREATE TABLE edges AS SELECT * FROM read_parquet(?)", [edge_path])
         n_nodes = con.execute("SELECT COUNT(*) FROM vertices").fetchone()[0]
-
-        edge_cols = [r[0] for r in con.execute("DESCRIBE edges").fetchall()]
-        src_col, dst_col = resolve_rel_column_names(edge_cols)
-        prop_cols = [c for c in edge_cols if c not in (src_col, dst_col)]
 
         # Dense id -> CSR index mapping, ordered by primary key (or input row
         # order when input_sorted).
@@ -90,61 +97,91 @@ def convert_graph(
             props = ", " + ", ".join(f"e.{_q(c)}" for c in prop_cols)
             select_fwd += props
             select_rev += props
+        # The edge file is scanned straight from Parquet and never materialized
+        # as a DuckDB table, and there is no materialized `relations` copy
+        # either: the indices sort and the indptr GROUP BY each run their own
+        # join over the streaming parquet scan.  Peak temp usage is therefore
+        # just the external sort spill, not a full copy of the (potentially
+        # multi-billion-row) edge set.
         join_clause = f"""
-            FROM edges e
+            FROM read_parquet(?) AS e
             JOIN src_map m1 ON e.{_q(src_col)} = m1.original_node_id
             JOIN src_map m2 ON e.{_q(dst_col)} = m2.original_node_id
         """
-
+        # Inner relation: dense csr ids per edge (plus properties).  One
+        # read_parquet(?) placeholder per branch, hence the parameter lists
+        # below.
         if not add_reverse_edges:
-            rel_query = f"SELECT {select_fwd} {join_clause}"
+            inner = f"SELECT {select_fwd} {join_clause}"
+            inner_params = [edge_path]
         else:
             # Self-loops appear once (forward only); non-self edges get both directions.
-            rel_query = f"""
+            inner = f"""
                 SELECT {select_fwd} {join_clause}
                 UNION ALL
                 SELECT {select_rev} {join_clause}
                 WHERE e.{_q(src_col)} != e.{_q(dst_col)}
             """
-        with step_progress("Joining and mapping edges (duckdb)"):
-            con.execute(f"CREATE TABLE relations AS {rel_query}")
+            inner_params = [edge_path, edge_path]
 
-        # indices: neighbour list sorted by (source, target)
-        select_props = ", " + ", ".join(_q(c) for c in prop_cols) if prop_cols else ""
+        # indices: neighbour list sorted by (source, target), streamed directly
+        # to Parquet via COPY.  The external sort spills to temp only when
+        # memory_limit is exceeded, then the sorted stream is written out.
+        # Sort keys are packed into one 8-byte UBIGINT ((source << 32) | target)
+        # so each row through the external sort is just key + properties: for
+        # multi-billion-row edge sets this halves the spill footprint versus
+        # sorting two 8-byte keys, which otherwise blows past the temp cap.
+        select_props = (
+            ", " + ", ".join(_q(c) for c in prop_cols) if prop_cols else ""
+        )
+        idx_query = (
+            f"SELECT CAST(sort_key & 4294967295 AS UBIGINT) AS target"
+            f"{select_props} "
+            f"FROM (SELECT ((csr_source::UBIGINT << 32) | "
+            f"csr_target::UBIGINT) AS sort_key{select_props} FROM ({inner})) "
+            f"ORDER BY sort_key"
+        )
         with step_progress("Sorting edges (duckdb)"):
-            con.execute(f"""
-                CREATE TABLE indices AS
-                SELECT csr_target::UBIGINT AS target{select_props}
-                FROM relations
-                ORDER BY csr_source, csr_target
-                """)
+            con.execute(
+                f"""
+                COPY ({idx_query}) TO ?
+                (FORMAT PARQUET, COMPRESSION ZSTD,
+                 KV_METADATA {{ icebug_disk_version: '{ICEBUG_DISK_VERSION}' }})
+                """,
+                [str(out_dir / f"indices_{csr_rel_name(name)}.parquet")]
+                + inner_params,
+            )
 
         # indptr: cumulative degree per source node, zero-filled, N+1 entries.
-        con.execute(f"""
-            CREATE TABLE indptr AS
-            WITH node_range AS (
-                SELECT unnest(range(0, {n_nodes})) AS node_id
-            ),
-            degrees AS (
-                SELECT csr_source AS src, COUNT(*) AS deg
-                FROM relations
-                GROUP BY csr_source
-            ),
-            cumulative AS (
-                SELECT
-                    node_range.node_id,
-                    COALESCE(
-                        SUM(degrees.deg) OVER (
-                            ORDER BY node_range.node_id
-                            ROWS UNBOUNDED PRECEDING
-                        ), 0
-                    ) AS ptr
-                FROM node_range
-                LEFT JOIN degrees ON node_range.node_id = degrees.src
+        with step_progress("Building indptr (duckdb)"):
+            con.execute(
+                f"""
+                CREATE TABLE indptr AS
+                WITH node_range AS (
+                    SELECT unnest(range(0, {n_nodes})) AS node_id
+                ),
+                degrees AS (
+                    SELECT csr_source AS src, COUNT(*) AS deg
+                    FROM ({inner})
+                    GROUP BY csr_source
+                ),
+                cumulative AS (
+                    SELECT
+                        node_range.node_id,
+                        COALESCE(
+                            SUM(degrees.deg) OVER (
+                                ORDER BY node_range.node_id
+                                ROWS UNBOUNDED PRECEDING
+                            ), 0
+                        ) AS ptr
+                    FROM node_range
+                    LEFT JOIN degrees ON node_range.node_id = degrees.src
+                )
+                SELECT ptr FROM cumulative
+                ORDER BY node_id
+                """,
+                inner_params,
             )
-            SELECT ptr FROM cumulative
-            ORDER BY node_id
-            """)
         con.execute("""
             CREATE OR REPLACE TABLE indptr AS
             SELECT 0::UBIGINT AS ptr
@@ -155,9 +192,6 @@ def convert_graph(
 
         _write_parquet_with_icebug_metadata(
             con, "vertices", out_dir / f"nodes_{name}.parquet"
-        )
-        _write_parquet_with_icebug_metadata(
-            con, "indices", out_dir / f"indices_{csr_rel_name(name)}.parquet"
         )
         _write_parquet_with_icebug_metadata(
             con, "indptr", out_dir / f"indptr_{csr_rel_name(name)}.parquet"
@@ -226,6 +260,10 @@ def build_csr_from_arrow_tables(
         set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
     set_threads(con, threads)
+    # Disable insertion-order preservation: saves memory/disk during the
+    # external sort of large edge sets (relations/indices are read back
+    # fully sorted by ORDER BY anyway).
+    con.execute("SET preserve_insertion_order = false")
     try:
         con.register("vertices", node_table)
         con.register("vertices_dst", to_node_table)
