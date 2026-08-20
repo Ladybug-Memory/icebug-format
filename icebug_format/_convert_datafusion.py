@@ -94,10 +94,12 @@ def _build_context(
     memory_limit: str | None,
     max_tmp_dir_gb: float | None = None,
     threads: int | None = None,
+    temp_dir: str | None = None,
 ):
     """Return a ``SessionContext`` that honors *memory_limit* as a spill pool,
-    *max_tmp_dir_gb* as the temp directory size cap, and *threads* as the
-    worker partition count.
+    *max_tmp_dir_gb* as the temp directory size cap, *threads* as the
+    worker partition count, and *temp_dir* as the directory used for spill
+    files.
 
     Without a limit (or with an unparseable/non-positive one) a default
     ``SessionContext`` is returned.  With a limit, the session's runtime uses
@@ -111,28 +113,43 @@ def _build_context(
     data may accumulate on disk (the DataFusion analogue of DuckDB's
     ``max_temp_directory_size`` PRAGMA).  With a thread count,
     ``datafusion.execution.target_partitions`` bounds operator parallelism
-    (the DataFusion analogue of DuckDB's ``threads``).
+    (the DataFusion analogue of DuckDB's ``threads``).  With *temp_dir*, the
+    runtime's DiskManager writes its spill files there instead of the OS temp
+    dir (which may be on a small or slow filesystem).
     """
-    if not memory_limit and not max_tmp_dir_gb and threads is None:
+    if not memory_limit and not max_tmp_dir_gb and threads is None and temp_dir is None:
         return datafusion.SessionContext()
 
     config = None
     runtime = None
     limit_bytes = parse_size_to_bytes(memory_limit) if memory_limit else None
-    if limit_bytes:
-        spill_reservation = min(
-            max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
-        )
-        in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
-        config = datafusion.SessionConfig(
-            {
-                "datafusion.execution.sort_spill_reservation_bytes": str(
-                    spill_reservation
-                ),
-                "datafusion.execution.sort_in_place_threshold_bytes": str(in_place),
-            }
-        )
-        runtime = datafusion.RuntimeEnvBuilder().with_fair_spill_pool(limit_bytes)
+    if limit_bytes or temp_dir:
+        builder = datafusion.RuntimeEnvBuilder()
+        if limit_bytes:
+            spill_reservation = min(
+                max(limit_bytes // 8, _SPILL_RESERVATION_FLOOR), _SPILL_RESERVATION_CAP
+            )
+            in_place = min(max(limit_bytes // 64, _IN_PLACE_FLOOR), _IN_PLACE_CAP)
+            config = datafusion.SessionConfig(
+                {
+                    "datafusion.execution.sort_spill_reservation_bytes": str(
+                        spill_reservation
+                    ),
+                    "datafusion.execution.sort_in_place_threshold_bytes": str(
+                        in_place
+                    ),
+                }
+            )
+            builder = builder.with_fair_spill_pool(limit_bytes)
+        if temp_dir:
+            # SortExec/aggregate spill files are written by the runtime's
+            # DiskManager, which defaults to the OS temp dir (often /tmp on a
+            # small root filesystem).  ``with_disk_manager_specified`` points
+            # it at the caller-supplied directory; ``with_temp_file_path``
+            # covers the remaining ad-hoc temp files.
+            builder = builder.with_disk_manager_specified(temp_dir)
+            builder = builder.with_temp_file_path(temp_dir)
+        runtime = builder
 
     ctx = datafusion.SessionContext(config=config, runtime=runtime)
     if max_tmp_dir_gb:
@@ -397,7 +414,10 @@ def convert_graph(
     directory size (``datafusion.runtime.max_temp_directory_size``).
     ``input_sorted`` skips the node-table sort: CSR ids are then assigned by
     row position, which is only valid when the vertex parquet is already
-    ordered by primary key.
+    ordered by primary key.  ``graph['tmp_dir']`` (set by
+    :func:`icebug_format.convert_parquet.convert_parquet_dir_to_csr` to a
+    sibling of the source directory) redirects the engine's spill files away
+    from the OS temp dir.
     """
     from icebug_format._datafusion import require_datafusion
 
@@ -405,6 +425,9 @@ def convert_graph(
     out_dir = Path(graph["output_dir"])
     vertex_path = str(graph["vertex"])
     edge_path = str(graph["edge"])
+    tmp_dir = graph.get("tmp_dir")
+    if tmp_dir:
+        Path(tmp_dir).mkdir(parents=True, exist_ok=True)
 
     vf = pq.ParquetFile(vertex_path)
     pk = vf.schema_arrow.names[0]
@@ -415,7 +438,9 @@ def convert_graph(
     prop_cols = [c for c in ef.schema_arrow.names if c not in (src_col, dst_col)]
 
     datafusion = require_datafusion("the 'convert-datafusion' feature")
-    ctx = _build_context(datafusion, memory_limit, max_tmp_dir_gb, threads)
+    ctx = _build_context(
+        datafusion, memory_limit, max_tmp_dir_gb, threads, temp_dir=tmp_dir
+    )
     ctx.register_parquet("vertices", vertex_path)
     ctx.register_parquet("edges", edge_path)
 
@@ -457,10 +482,26 @@ def convert_graph(
     ctx.register_view("relations", ctx.sql(rel_sql))
 
     # indices: neighbour list sorted by (source, target), streamed to Parquet.
-    idx_sql = (
-        f"SELECT CAST(csr_target AS BIGINT) AS target{props_plain} "
-        f"FROM relations ORDER BY csr_source, csr_target"
-    )
+    if input_sorted and not add_reverse_edges:
+        # With ``input_sorted`` the caller guarantees the vertex parquet is
+        # ordered by primary key and the edge file by (source, target).  The
+        # join emits edges in file order and, since CSR ids are assigned by
+        # row position (a monotonic map), the result is already ordered by
+        # (csr_source, csr_target) -- skip the external sort entirely, which
+        # for multi-billion-row edge sets avoids a huge spill.
+        idx_sql = (
+            f"SELECT CAST(csr_target AS BIGINT) AS target{props_plain} "
+            f"FROM relations"
+        )
+    else:
+        # Otherwise sort, packing (source, target) into a single 8-byte key so
+        # each row through SortExec is key + properties rather than two 8-byte
+        # sort columns -- roughly halves the spill footprint for large edge sets.
+        idx_sql = (
+            f"SELECT CAST(sk & 4294967295 AS BIGINT) AS target{props_plain} "
+            f"FROM (SELECT ((csr_source::BIGINT << 32) | csr_target::BIGINT)"
+            f" AS sk{props_plain} FROM relations) ORDER BY sk"
+        )
     _stream_to_parquet(
         ctx.sql(idx_sql),
         out_dir / f"indices_{csr_rel_name(name)}.parquet",

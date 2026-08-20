@@ -67,10 +67,11 @@ def convert_graph(
         set_memory_limit(con, memory_limit)
     set_max_temp_dir_size(con, max_tmp_dir_gb)
     set_threads(con, threads)
-    # Disable insertion-order preservation: saves memory/disk during the
-    # external sort of large edge sets (the sorted stream is written straight
-    # to Parquet via COPY, so no insertion order needs to be kept).
-    con.execute("SET preserve_insertion_order = false")
+    # Note: we deliberately do NOT set ``preserve_insertion_order=false``
+    # here.  The indexed/CSR outputs (and, with ``input_sorted``, the
+    # skip-the-sort path that relies on the parquet scan order) must keep row
+    # order; disabling insertion-order preservation would let DuckDB reorder
+    # table rows and corrupt the CSR output.
     try:
         # input_sorted: the caller guarantees the vertex parquet is already
         # ordered by primary key, so skip the sort; CSR ids = row position.
@@ -134,14 +135,34 @@ def convert_graph(
         select_props = (
             ", " + ", ".join(_q(c) for c in prop_cols) if prop_cols else ""
         )
-        idx_query = (
-            f"SELECT CAST(sort_key & 4294967295 AS UBIGINT) AS target"
-            f"{select_props} "
-            f"FROM (SELECT ((csr_source::UBIGINT << 32) | "
-            f"csr_target::UBIGINT) AS sort_key{select_props} FROM ({inner})) "
-            f"ORDER BY sort_key"
-        )
-        with step_progress("Sorting edges (duckdb)"):
+        if input_sorted and not add_reverse_edges:
+            # With ``input_sorted`` the caller guarantees the vertex file is
+            # ordered by primary key and the edge file by (source, target).
+            # DuckDB's hash join preserves the left input's probe order, and
+            # assigning CSR ids by vertex row position is a monotonic map, so
+            # the join output is already ordered by (csr_source, csr_target).
+            # Skip the external sort entirely -- it would only re-sort (and
+            # spill) data that is already in the required order.
+            idx_query = (
+                f"SELECT m2.csr_index::UBIGINT AS target{select_props}"
+                f" {join_clause}"
+            )
+            step = "Mapping edges (duckdb)"
+        else:
+            # Otherwise sort by (source, target), packing both into one 8-byte
+            # UBIGINT ((source << 32) | target) so each row through the
+            # external sort is key + projected properties rather than two
+            # 8-byte keys -- roughly halves the spill footprint for
+            # multi-billion-row edge sets.
+            idx_query = (
+                f"SELECT CAST(sort_key & 4294967295 AS UBIGINT) AS target"
+                f"{select_props} "
+                f"FROM (SELECT ((csr_source::UBIGINT << 32) | "
+                f"csr_target::UBIGINT) AS sort_key{select_props} FROM ({inner})) "
+                f"ORDER BY sort_key"
+            )
+            step = "Sorting edges (duckdb)"
+        with step_progress(step):
             con.execute(
                 f"""
                 COPY ({idx_query}) TO ?

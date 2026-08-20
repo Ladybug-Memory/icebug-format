@@ -437,11 +437,28 @@ def convert_parquet_dir_to_csr(
 
     storage_path = storage if storage is not None else f"./{output_dir.name}"
 
+    # SQL backends that spill to disk (DataFusion's DiskManager) default to
+    # the OS temp dir (often /tmp), which may be small or on a slow filesystem.
+    # Point them at a sibling of the source directory instead, e.g.
+    # ``<source-dir>-tmp``, so spill files land next to the data they describe.
+    tmp_dir = Path(source_dir).parent / f"{Path(source_dir).name}-tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # DataFusion's DiskManager resolves its spill directory from the OS temp
+    # path (and other tooling, e.g. Python's tempfile, follows suit): point it
+    # at the sibling dir.  This must happen before the engine session is
+    # created, so set it here at the process level.
+    os.environ["TMPDIR"] = str(tmp_dir)
+
     convert = _select_backend(backend, memory_limit)
     results: list[dict] = []
     for g, out_dir in zip(graphs, out_dirs):
         out_dir.mkdir(parents=True, exist_ok=True)
-        ctx = {**g, "output_dir": out_dir, "storage": storage_path}
+        ctx = {
+            **g,
+            "output_dir": out_dir,
+            "storage": storage_path,
+            "tmp_dir": str(tmp_dir),
+        }
         start = time.perf_counter()
         convert(
             ctx,
